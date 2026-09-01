@@ -32,7 +32,7 @@ test("a successful delivery remains visible after the proxy is reopened", async 
 
   await sender.sendToBridge({
     bridgeId,
-    source: { provider: "claude", sessionId: "claude-session-1" },
+    source: { provider: "claude" },
     message: "Implement the approved design.",
   });
 
@@ -80,7 +80,7 @@ test("a failed delivery is reported and remains visible", async () => {
   await assert.rejects(
     proxy.sendToBridge({
       bridgeId,
-      source: { provider: "claude", sessionId: "claude-session-1" },
+      source: { provider: "claude" },
       message: "Implement the approved design.",
     }),
     /Codex session is offline/,

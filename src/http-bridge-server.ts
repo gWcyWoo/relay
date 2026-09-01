@@ -8,8 +8,8 @@ import {
   createBridgeProxy,
   type Delivery,
   type DeliveryReceipt,
-  type Endpoint,
   type SessionAdapter,
+  type Source,
 } from "./bridge-proxy.ts";
 import type { CodexAppServerClient } from "./codex-adapter.ts";
 import { createCodexAdapter } from "./codex-adapter.ts";
@@ -23,23 +23,23 @@ interface BridgeHttpServerOptions {
 }
 
 interface ActiveTransport {
-  source: Endpoint;
+  source: Source;
   server: McpServer;
   transport: StreamableHTTPServerTransport;
+  bridgeIds: Set<string>;
 }
 
 export interface BridgeHttpServer {
   url: URL;
-  endpoint(provider: "claude" | "codex", sessionId: string): URL;
+  endpoint(provider: "claude" | "codex"): URL;
   close(): Promise<void>;
 }
 
-function parseSource(provider: string, sessionId: string): Endpoint {
+function parseSource(provider: string): Source {
   if (provider !== "claude" && provider !== "codex") {
     throw new Error(`Unsupported provider: ${provider}`);
   }
-  if (!sessionId) throw new Error("Session id is required");
-  return { provider, sessionId };
+  return { provider };
 }
 
 export async function startBridgeHttpServer(
@@ -53,10 +53,10 @@ export async function startBridgeHttpServer(
   const claudeAdapter: SessionAdapter = {
     provider: "claude",
     async deliver(delivery: Delivery): Promise<DeliveryReceipt> {
-      const server = claudeConnections.get(delivery.targetSessionId);
+      const server = claudeConnections.get(delivery.bridgeId);
       if (!server) {
         throw new Error(
-          `Claude channel is not connected: ${delivery.targetSessionId}`,
+          `Claude channel is not connected for bridge: ${delivery.bridgeId}`,
         );
       }
       await server.server.notification({
@@ -74,17 +74,16 @@ export async function startBridgeHttpServer(
     adapters: [claudeAdapter, createCodexAdapter(options.codexAppServer)],
   });
 
-  app.all("/mcp/:provider/:sessionId", async (request, response) => {
+  app.all("/mcp/:provider", async (request, response) => {
     try {
-      const source = parseSource(request.params.provider, request.params.sessionId);
+      const source = parseSource(request.params.provider);
       const sessionHeader = request.headers["mcp-session-id"];
       const sessionId = typeof sessionHeader === "string" ? sessionHeader : undefined;
       let active = sessionId ? transports.get(sessionId) : undefined;
 
       if (active) {
         if (
-          active.source.provider !== source.provider ||
-          active.source.sessionId !== source.sessionId
+          active.source.provider !== source.provider
         ) {
           response.status(403).json({ error: "MCP session endpoint mismatch" });
           return;
@@ -95,25 +94,36 @@ export async function startBridgeHttpServer(
         isInitializeRequest(request.body)
       ) {
         let transport: StreamableHTTPServerTransport;
+        let server: McpServer;
+        const bridgeIds = new Set<string>();
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: randomUUID,
           onsessioninitialized: (initializedId) => {
-            transports.set(initializedId, { source, server, transport });
+            transports.set(initializedId, {
+              source,
+              server,
+              transport,
+              bridgeIds,
+            });
           },
         });
-        const server = createBridgeMcpServer({
+        server = createBridgeMcpServer({
           proxy,
           source,
           channel: source.provider === "claude",
+          onSend(bridgeId) {
+            if (source.provider !== "claude") return;
+            bridgeIds.add(bridgeId);
+            claudeConnections.set(bridgeId, server);
+          },
         });
-        active = { source, server, transport };
-        if (source.provider === "claude") {
-          claudeConnections.set(source.sessionId, server);
-        }
+        active = { source, server, transport, bridgeIds };
         transport.onclose = () => {
           if (transport.sessionId) transports.delete(transport.sessionId);
-          if (claudeConnections.get(source.sessionId) === server) {
-            claudeConnections.delete(source.sessionId);
+          for (const bridgeId of bridgeIds) {
+            if (claudeConnections.get(bridgeId) === server) {
+              claudeConnections.delete(bridgeId);
+            }
           }
         };
         await server.connect(transport);
@@ -156,11 +166,8 @@ export async function startBridgeHttpServer(
 
   return {
     url: baseUrl,
-    endpoint(provider, sessionId) {
-      return new URL(
-        `/mcp/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}`,
-        baseUrl,
-      );
+    endpoint(provider) {
+      return new URL(`/mcp/${encodeURIComponent(provider)}`, baseUrl);
     },
     async close() {
       await Promise.allSettled(

@@ -29,14 +29,14 @@ The store is managed internally and is not part of the public command.
 Previously created longer IDs remain valid. `serve` launches the proxy at
 `http://127.0.0.1:8765` and starts `codex app-server`.
 
-Register the session-specific endpoints:
+Register the provider endpoints once. They are shared by every Relay pairing:
 
 ```bash
 claude mcp add --transport http --scope user relay \
-  http://127.0.0.1:8765/mcp/claude/<CLAUDE_SESSION_UUID>
+  http://127.0.0.1:8765/mcp/claude
 
 codex mcp add relay --url \
-  http://127.0.0.1:8765/mcp/codex/<CODEX_THREAD_ID>
+  http://127.0.0.1:8765/mcp/codex
 ```
 
 Start or resume Claude Code with the same UUID, Remote Control, and the Channel:
@@ -46,9 +46,11 @@ claude --resume <CLAUDE_SESSION_UUID> --remote-control \
   --dangerously-load-development-channels server:relay
 ```
 
-Then either model calls `send` with the `bridgeId`. Messages from
-Claude resume the paired Codex thread and start a turn. Messages from Codex are
-pushed into the connected Claude session as Channel events.
+Then either model calls `send` with the `bridgeId`. Relay combines the caller's
+provider with the stored pairing to resolve both session IDs. A Claude call also
+binds that active Channel connection to the `bridgeId`; later Codex replies for
+that bridge are pushed back through the same Channel. After reconnecting Claude,
+send from Claude once before expecting a Codex-initiated reply.
 
 ## Commands
 

@@ -40,7 +40,7 @@ test("an endpoint sends through the single send MCP tool", async () => {
   const proxy = createBridgeProxy({ storePath, adapters: [codexAdapter] });
   const server = createBridgeMcpServer({
     proxy,
-    source: { provider: "claude", sessionId: "claude-session-1" },
+    source: { provider: "claude" },
   });
   const client = new Client({ name: "test-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

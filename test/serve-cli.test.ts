@@ -45,7 +45,7 @@ test("the serve CLI starts a usable HTTP MCP proxy", async () => {
     });
     await client.connect(
       new StreamableHTTPClientTransport(
-        new URL("/mcp/codex/codex-thread-1", started.url),
+        new URL("/mcp/codex", started.url),
       ),
     );
     const tools = await client.listTools();

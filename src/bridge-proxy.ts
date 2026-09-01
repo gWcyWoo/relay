@@ -6,6 +6,10 @@ export interface Endpoint {
   sessionId: string;
 }
 
+export interface Source {
+  provider: string;
+}
+
 export interface Delivery {
   bridgeId: string;
   targetSessionId: string;
@@ -31,7 +35,7 @@ export interface SessionAdapter {
 
 interface SendInput {
   bridgeId: string;
-  source: Endpoint;
+  source: Source;
   message: string;
 }
 
@@ -92,15 +96,18 @@ export function createBridgeProxy(options: BridgeProxyOptions): BridgeProxy {
 
       const left = parseEndpoint(row.left_endpoint);
       const right = parseEndpoint(row.right_endpoint);
-      const sourceKey = `${input.source.provider}:${input.source.sessionId}`;
-      const target =
-        sourceKey === row.left_endpoint
-          ? right
-          : sourceKey === row.right_endpoint
-            ? left
-            : undefined;
-      if (!target) {
-        throw new Error(`Source endpoint is not part of bridge: ${input.bridgeId}`);
+      const sourceIsLeft =
+        left.provider === input.source.provider &&
+        right.provider !== input.source.provider;
+      const sourceIsRight =
+        right.provider === input.source.provider &&
+        left.provider !== input.source.provider;
+      const source = sourceIsLeft ? left : sourceIsRight ? right : undefined;
+      const target = sourceIsLeft ? right : sourceIsRight ? left : undefined;
+      if (!source || !target) {
+        throw new Error(
+          `Source provider is not uniquely part of bridge: ${input.bridgeId}`,
+        );
       }
 
       const adapter = adapters.get(target.provider);
@@ -125,8 +132,8 @@ export function createBridgeProxy(options: BridgeProxyOptions): BridgeProxy {
           .run(
             randomUUID(),
             input.bridgeId,
-            input.source.provider,
-            input.source.sessionId,
+            source.provider,
+            source.sessionId,
             target.provider,
             target.sessionId,
             status,

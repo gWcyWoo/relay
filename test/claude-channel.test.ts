@@ -51,7 +51,7 @@ test("a Codex message is pushed into the paired Claude session as a channel even
 
   await proxy.sendToBridge({
     bridgeId,
-    source: { provider: "codex", sessionId: "codex-thread-1" },
+    source: { provider: "codex" },
     message: "Which deployment target should I use?",
   });
 

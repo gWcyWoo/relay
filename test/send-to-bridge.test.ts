@@ -14,7 +14,7 @@ import {
 const execFileAsync = promisify(execFile);
 const cliPath = path.resolve("src/cli.ts");
 
-test("a Claude endpoint sends a message to its paired Codex session", async () => {
+test("a Claude provider sends a message to its paired Codex session", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "relay-send-"));
   const storePath = path.join(directory, "bridge.sqlite");
   const { stdout } = await execFileAsync(process.execPath, [
@@ -39,7 +39,7 @@ test("a Claude endpoint sends a message to its paired Codex session", async () =
 
   const receipt = await proxy.sendToBridge({
     bridgeId,
-    source: { provider: "claude", sessionId: "claude-session-1" },
+    source: { provider: "claude" },
     message: "Implement the approved design.",
   });
 
@@ -51,4 +51,37 @@ test("a Claude endpoint sends a message to its paired Codex session", async () =
       message: "Implement the approved design.",
     },
   ]);
+});
+
+test("a bridge id and provider must identify one stored source", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "relay-source-"));
+  const storePath = path.join(directory, "bridge.sqlite");
+  const { stdout } = await execFileAsync(process.execPath, [
+    "--experimental-strip-types",
+    cliPath,
+    "pair",
+    "--store",
+    storePath,
+    "claude:claude-session-1",
+    "codex:codex-thread-1",
+  ]);
+  const { bridgeId } = JSON.parse(stdout) as { bridgeId: string };
+  const proxy = createBridgeProxy({ storePath, adapters: [] });
+
+  await assert.rejects(
+    proxy.sendToBridge({
+      bridgeId: "99999",
+      source: { provider: "claude" },
+      message: "Unknown bridge.",
+    }),
+    /Unknown bridge: 99999/,
+  );
+  await assert.rejects(
+    proxy.sendToBridge({
+      bridgeId,
+      source: { provider: "kimi" },
+      message: "Wrong provider.",
+    }),
+    new RegExp(`Source provider is not uniquely part of bridge: ${bridgeId}`),
+  );
 });

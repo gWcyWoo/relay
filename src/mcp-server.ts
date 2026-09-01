@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { BridgeProxy, Endpoint } from "./bridge-proxy.ts";
+import type { BridgeProxy, Source } from "./bridge-proxy.ts";
 
 interface BridgeMcpServerOptions {
   proxy: BridgeProxy;
-  source: Endpoint;
+  source: Source;
   channel?: boolean;
+  onSend?: (bridgeId: string) => void;
 }
 
 export function createBridgeMcpServer(options: BridgeMcpServerOptions): McpServer {
@@ -30,6 +31,7 @@ export function createBridgeMcpServer(options: BridgeMcpServerOptions): McpServe
       },
     },
     async ({ bridgeId, message }) => {
+      options.onSend?.(bridgeId);
       const receipt = await options.proxy.sendToBridge({
         bridgeId,
         source: options.source,
