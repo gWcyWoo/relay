@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createConnection } from "./connections.ts";
+import { createConnection, macDesktop, type DesktopDriver } from "./connections.ts";
 import type { RelayState } from "./relay-state.ts";
 
 interface RelayMcpServerOptions {
@@ -10,6 +10,8 @@ interface RelayMcpServerOptions {
   relay: RelayState;
   /** Called with the sessionId once this MCP session registers, so the bridge can drop its connection on close. */
   onRegister?: (sessionId: string) => void;
+  /** Host actions for desktop-driven providers; defaults to the real macOS driver. */
+  desktop?: DesktopDriver;
 }
 
 const pathSchema = z
@@ -37,6 +39,7 @@ function text(value: unknown) {
 
 export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer {
   const { provider, relay } = options;
+  const desktop = options.desktop ?? macDesktop;
   const server = new McpServer(
     { name: "relay", version: "0.3.0" },
     {
@@ -59,7 +62,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     async ({ sessionId, path, role }) => {
       const resolvedPath = await resolvePath(server, path);
       relay.register({ sessionId, provider, path: resolvedPath, role });
-      relay.connect(sessionId, createConnection(provider, server));
+      relay.connect(sessionId, createConnection(provider, { server, sessionId, desktop }));
       options.onRegister?.(sessionId);
       return text({ registered: true, sessionId, provider, path: resolvedPath, role });
     },

@@ -5,7 +5,7 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { createConnection } from "./connections.ts";
+import { createConnection, macDesktop, type DesktopDriver } from "./connections.ts";
 import { createRelayMcpServer } from "./mcp-server.ts";
 import { createRelayState } from "./relay-state.ts";
 
@@ -23,6 +23,8 @@ export interface BridgeHttpServerOptions {
   claudeReinitAfterMs?: number;
   /** Window after a transport's creation in which a fresh unregistered transport may adopt its registration. */
   adoptWindowMs?: number;
+  /** Host actions for desktop-driven providers; injectable for tests. */
+  desktop?: DesktopDriver;
 }
 
 interface ActiveTransport {
@@ -57,6 +59,7 @@ export async function startBridgeHttpServer(
   const disconnectGraceMs = options.disconnectGraceMs ?? 3000;
   const claudeReinitAfterMs = options.claudeReinitAfterMs ?? 10_000;
   const adoptWindowMs = options.adoptWindowMs ?? 5000;
+  const desktop = options.desktop ?? macDesktop;
   const app = createMcpExpressApp({ host });
   const transports = new Map<string, ActiveTransport>();
   const relay = createRelayState();
@@ -126,6 +129,7 @@ export async function startBridgeHttpServer(
         server = createRelayMcpServer({
           provider,
           relay,
+          desktop,
           onRegister: (id) => {
             created.sessionId = id;
           },
@@ -152,7 +156,14 @@ export async function startBridgeHttpServer(
           );
           if (heirs.length === 1) {
             heirs[0].sessionId = created.sessionId;
-            relay.connect(created.sessionId, createConnection(created.provider, heirs[0].server));
+            relay.connect(
+              created.sessionId,
+              createConnection(created.provider, {
+                server: heirs[0].server,
+                sessionId: created.sessionId,
+                desktop,
+              }),
+            );
           } else {
             relay.disconnect(created.sessionId);
           }

@@ -39,7 +39,7 @@ describe("relay state", () => {
     assert.deepEqual(relay.pairsOf("cl", "codex", "review"), ["cx"]);
     assert.deepEqual(deliver.mock.calls[0].arguments, [
       "review this",
-      { sessionId: "cx", provider: "codex", role: "review" },
+      { sessionId: "cx", provider: "codex", role: "review", senderRole: "" },
     ]);
 
     // Claude answers with the same call shape; Codex is waiting so it gets the text back.

@@ -21,7 +21,10 @@ export interface Registration {
 export interface Sender {
   sessionId: string;
   provider: string;
+  /** Pair label the sender used in this send (the role it asked for). */
   role: string;
+  /** The sender's own registered role, so the receiver can address it. */
+  senderRole: string;
 }
 
 export interface Connection {
@@ -228,7 +231,12 @@ export function createRelayState(): RelayState {
         } else {
           const connection = connections.get(other);
           if (!connection) throw new Error(`Target session has no live connection: ${other}`);
-          await connection.deliver(message, { sessionId: selfSessionId, provider: self.provider, role });
+          await connection.deliver(message, {
+            sessionId: selfSessionId,
+            provider: self.provider,
+            role,
+            senderRole: self.role,
+          });
         }
       } catch (error) {
         waiting.delete(selfSessionId);

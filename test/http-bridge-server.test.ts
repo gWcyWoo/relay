@@ -380,6 +380,63 @@ test("when a registered transport closes, the one fresh unregistered transport i
   }
 });
 
+test("a message to an idle codex session is delivered through the codex:// deep link and submitted", async () => {
+  const calls: string[] = [];
+  const desktop = {
+    async open(url: string) { calls.push(`open ${url}`); },
+    async submit(app: string) { calls.push(`submit ${app}`); },
+  };
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  try {
+    await claude.callTool({ name: "register", arguments: { sessionId: "cl-1", path: "/p", role: "architect" } });
+    await codex.callTool({ name: "register", arguments: { sessionId: "thread-42", path: "/p" } });
+
+    const result = await claude.callTool({
+      name: "send",
+      arguments: { message: "please implement the login page", selfSessionId: "cl-1", target: "codex" },
+    });
+    assert.equal(result.isError, undefined);
+
+    assert.equal(calls.length, 2);
+    const url = new URL(calls[0].replace("open ", ""));
+    assert.equal(url.protocol, "codex:");
+    assert.equal(url.host, "threads");
+    assert.equal(url.pathname, "/thread-42");
+    const prompt = url.searchParams.get("prompt") ?? "";
+    assert.match(prompt, /^\[Relay\] from claude \(role "architect"\)\. Reply with send\(target="claude", role="architect"\)\./);
+    assert.match(prompt, /please implement the login page$/);
+    assert.equal(calls[1], "submit ChatGPT");
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
+test("when the desktop cannot submit, send fails visibly but says the message is in the composer", async () => {
+  const desktop = {
+    async open() {},
+    async submit() { throw new Error("osascript is not allowed to send keystrokes"); },
+  };
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  try {
+    await claude.callTool({ name: "register", arguments: { sessionId: "cl-1", path: "/p", role: "architect" } });
+    await codex.callTool({ name: "register", arguments: { sessionId: "thread-42", path: "/p" } });
+    const result = await claude.callTool({
+      name: "send",
+      arguments: { message: "task", selfSessionId: "cl-1", target: "codex" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /in the Codex composer for thread thread-42 but was not submitted: osascript is not allowed/);
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
 test("an unknown session ID gets 404 so the client re-initializes", async () => {
   const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
   try {
