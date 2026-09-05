@@ -9,12 +9,13 @@ import {
 
 function pushConnection(provider = "claude") {
   const deliver = mock.fn(async (_message: string, _from: Sender) => {});
-  const connection: Connection = { provider, deliver };
+  const connection: Connection = { provider, deliver, waitsForReply: false };
   return { connection, deliver };
 }
 
 const waitOnly: Connection = {
   provider: "codex",
+  waitsForReply: true,
   async deliver() {
     throw new Error("codex cannot receive pushes");
   },
@@ -33,7 +34,7 @@ describe("relay state", () => {
     const { connection, deliver } = pushConnection();
     relay.connect("cl", connection);
 
-    const pending = relay.send({ message: "review this", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    const pending = relay.send({ message: "review this", selfSessionId: "cx", target: "claude", role: "review" });
     assert.deepEqual(relay.pairsOf("cx", "claude", "review"), ["cl"]);
     assert.deepEqual(relay.pairsOf("cl", "codex", "review"), ["cx"]);
     assert.deepEqual(deliver.mock.calls[0].arguments, [
@@ -49,11 +50,11 @@ describe("relay state", () => {
   it("later sends hit the pair table without touching the registry", async () => {
     const { connection, deliver } = pushConnection();
     relay.connect("cl", connection);
-    void relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    void relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review" });
     await relay.send({ message: "ack", selfSessionId: "cl", target: "codex", role: "review" });
     // A second reviewer at the same path would make a registry lookup ambiguous; the pair avoids it.
     relay.register({ sessionId: "cl2", provider: "claude", path: "/p", role: "review" });
-    void relay.send({ message: "two", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    void relay.send({ message: "two", selfSessionId: "cx", target: "claude", role: "review" });
     assert.equal(deliver.mock.calls[1].arguments[0], "two");
   });
 
@@ -62,7 +63,7 @@ describe("relay state", () => {
     relay.register({ sessionId: "cl-tester", provider: "claude", path: "/p", role: "test" });
     const { connection, deliver } = pushConnection();
     relay.connect("cl", connection);
-    await relay.send({ message: "r", selfSessionId: "cx", target: "claude", role: "review" });
+    void relay.send({ message: "r", selfSessionId: "cx", target: "claude", role: "review" });
     assert.deepEqual(relay.pairsOf("cx", "claude", "review"), ["cl"]);
     assert.equal(deliver.mock.calls.length, 1);
   });
@@ -70,7 +71,7 @@ describe("relay state", () => {
   it("empty role matches any role", async () => {
     const { connection } = pushConnection();
     relay.connect("cl", connection);
-    await relay.send({ message: "r", selfSessionId: "cx", target: "claude" });
+    void relay.send({ message: "r", selfSessionId: "cx", target: "claude" });
     assert.deepEqual(relay.pairsOf("cx", "claude"), ["cl"]);
   });
 
@@ -97,7 +98,7 @@ describe("relay state", () => {
       relay.send({ message: "x", selfSessionId: "cx", target: "claude", role: "review" }),
       /Several claude session with role "review" at \/p: cl, cl2; pass one sessionId as target/,
     );
-    await relay.send({ message: "x", selfSessionId: "cx", target: "cl2", role: "review" });
+    void relay.send({ message: "x", selfSessionId: "cx", target: "cl2", role: "review" });
     assert.deepEqual(relay.pairsOf("cx", "claude", "review"), ["cl2"]);
     assert.equal(second.deliver.mock.calls.length, 1);
   });
@@ -121,21 +122,21 @@ describe("relay state", () => {
   it("registration and pair survive disconnect; reconnect restores delivery", async () => {
     const first = pushConnection();
     relay.connect("cl", first.connection);
-    void relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    void relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review" });
     relay.disconnect("cl");
     assert.deepEqual(relay.pairsOf("cx", "claude", "review"), ["cl"]);
 
     const second = pushConnection();
     relay.connect("cl", second.connection);
     await relay.send({ message: "ack", selfSessionId: "cl", target: "codex", role: "review" });
-    void relay.send({ message: "two", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    void relay.send({ message: "two", selfSessionId: "cx", target: "claude", role: "review" });
     assert.equal(second.deliver.mock.calls[0].arguments[0], "two");
   });
 
   it("unregister drops pairs and fails the waiting counterpart", async () => {
     const { connection } = pushConnection();
     relay.connect("cl", connection);
-    const pending = relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    const pending = relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review" });
     relay.unregister("cl");
     await assert.rejects(pending, /Counterpart unregistered: cl/);
     assert.deepEqual(relay.pairsOf("cx", "claude", "review"), []);
@@ -148,8 +149,8 @@ describe("relay state", () => {
     relay.register({ sessionId: "cx2", provider: "codex", path: "/p", role: "" });
     relay.connect("cx2", waitOnly);
 
-    const fromA = relay.send({ message: "from A", selfSessionId: "cx", target: "claude", role: "review", wait: true });
-    const fromB = relay.send({ message: "from B", selfSessionId: "cx2", target: "claude", role: "review", wait: true });
+    const fromA = relay.send({ message: "from A", selfSessionId: "cx", target: "claude", role: "review" });
+    const fromB = relay.send({ message: "from B", selfSessionId: "cx2", target: "claude", role: "review" });
     assert.deepEqual(relay.pairsOf("cl", "codex", "review").sort(), ["cx", "cx2"]);
     assert.deepEqual(
       deliver.mock.calls.map((c) => (c.arguments[1] as Sender).sessionId),
@@ -173,7 +174,7 @@ describe("relay state", () => {
   it("snapshot shows all tables and clear empties them, failing waiters", async () => {
     const { connection } = pushConnection();
     relay.connect("cl", connection);
-    const pending = relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review", wait: true });
+    const pending = relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review" });
 
     const snap = relay.snapshot();
     assert.deepEqual(snap.registrations.map((r) => r.sessionId).sort(), ["cl", "cx"]);
@@ -192,9 +193,9 @@ describe("relay state", () => {
   it("a session cannot wait twice at once", async () => {
     const { connection } = pushConnection();
     relay.connect("cl", connection);
-    void relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review", wait: true }).catch(() => {});
+    void relay.send({ message: "one", selfSessionId: "cx", target: "claude", role: "review" }).catch(() => {});
     await assert.rejects(
-      relay.send({ message: "again", selfSessionId: "cx", target: "claude", role: "review", wait: true }),
+      relay.send({ message: "again", selfSessionId: "cx", target: "claude", role: "review" }),
       /already waiting in send/,
     );
   });

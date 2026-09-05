@@ -60,7 +60,7 @@ test("Codex sends with target, Claude gets a channel push and answers with send"
 
     const sendPromise = codex.callTool({
       name: "send",
-      arguments: { message: "What is 2+2?", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "What is 2+2?", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
 
     assert.deepEqual(await pushed, { content: "What is 2+2?", from: "cx-1", provider: "codex", role: "review" });
@@ -74,6 +74,34 @@ test("Codex sends with target, Claude gets a channel push and answers with send"
     const result = await sendPromise;
     assert.equal(result.isError, undefined);
     assert.equal(textOf(result), "4");
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
+test("codex send waits for the reply while claude send returns at once", async () => {
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  const pushed = nextChannelMessage(claude);
+  try {
+    await claude.callTool({ name: "register", arguments: { sessionId: "cl-1", path: "/p", role: "review" } });
+    await codex.callTool({ name: "register", arguments: { sessionId: "cx-1", path: "/p" } });
+    const pending = codex.callTool({
+      name: "send",
+      arguments: { message: "q", selfSessionId: "cx-1", target: "claude", role: "review" },
+    });
+    await pushed;
+    const state = await (await fetch(new URL("/admin/state", bridge.url))).json();
+    assert.deepEqual(state.waiting, ["cx-1"]);
+
+    const reply = await claude.callTool({
+      name: "send",
+      arguments: { message: "a", selfSessionId: "cl-1", target: "codex", role: "review" },
+    });
+    assert.deepEqual(JSON.parse(textOf(reply)), { sent: true });
+    assert.equal(textOf(await pending), "a");
   } finally {
     await Promise.allSettled([claude.close(), codex.close()]);
     await bridge.close();
@@ -178,7 +206,7 @@ test("a session that drops without DELETE keeps its registration and pair; re-re
     const first = nextChannelMessage(claude1);
     const pending1 = codex.callTool({
       name: "send",
-      arguments: { message: "one", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "one", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
     await first;
 
@@ -202,7 +230,7 @@ test("a session that drops without DELETE keeps its registration and pair; re-re
     // The pair is intact: no target needed.
     const pending2 = codex.callTool({
       name: "send",
-      arguments: { message: "two", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "two", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
     assert.deepEqual(await second, { content: "two", from: "cx-1", provider: "codex", role: "review" });
     await claude2.callTool({
@@ -230,7 +258,7 @@ test("unregister drops the pair and fails the waiting counterpart", async () => 
     await codex.callTool({ name: "register", arguments: { sessionId: "cx-1", path: "/p" } });
     const pending = codex.callTool({
       name: "send",
-      arguments: { message: "one", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "one", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
     await pushed;
 
@@ -241,7 +269,7 @@ test("unregister drops the pair and fails the waiting counterpart", async () => 
 
     const again = await codex.callTool({
       name: "send",
-      arguments: { message: "two", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "two", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
     assert.equal(again.isError, true);
     assert.match(textOf(again), /No claude session with role "review" at \/p/);
@@ -263,7 +291,7 @@ test("admin endpoints expose and clear the relay state", async () => {
     await codex.callTool({ name: "register", arguments: { sessionId: "cx-1", path: "/p" } });
     const pending = codex.callTool({
       name: "send",
-      arguments: { message: "one", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "one", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
     await pushed;
 
@@ -338,7 +366,7 @@ test("when a registered transport closes, the one fresh unregistered transport i
 
     const pending = codex.callTool({
       name: "send",
-      arguments: { message: "hello heir", selfSessionId: "cx-1", target: "claude", role: "review", wait: true },
+      arguments: { message: "hello heir", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
     assert.equal((await pushed).content, "hello heir");
     await replacement.callTool({

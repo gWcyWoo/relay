@@ -7,7 +7,8 @@
  *    by (target provider, role, sender's path); later sends hit the pair directly.
  *    One side may have several counterparts (many Codex sessions asking one Claude reviewer).
  *  - connections: sessionId -> delivery strategy for that provider (see connections.ts)
- * Plus `waiting`: sessions blocked inside send(wait=true), resolved by the counterpart's next send.
+ * Plus `waiting`: sessions blocked inside send because their strategy waits for the reply
+ * (providers without a push channel); resolved by the counterpart's next send.
  */
 
 export interface Registration {
@@ -27,6 +28,8 @@ export interface Connection {
   provider: string;
   /** Push a message to this session. Throws if the provider cannot receive pushes. */
   deliver(message: string, from: Sender): Promise<void>;
+  /** Whether this provider's send blocks until the counterpart answers (true when it cannot be pushed to). */
+  waitsForReply: boolean;
 }
 
 export interface SendOptions {
@@ -39,8 +42,6 @@ export interface SendOptions {
   target: string;
   /** Counterpart role, e.g. "review"; also labels the pair on both sides. */
   role?: string;
-  /** Block until the counterpart's next send and return its message. */
-  wait?: boolean;
 }
 
 export interface RelaySnapshot {
@@ -49,7 +50,7 @@ export interface RelaySnapshot {
   pairs: Array<{ sessionId: string; target: string; role: string; counterparts: string[] }>;
   /** Sessions with a live delivery connection. */
   connected: string[];
-  /** Sessions currently blocked inside send(wait=true). */
+  /** Sessions currently blocked inside send waiting for a reply. */
   waiting: string[];
 }
 
@@ -199,9 +200,12 @@ export function createRelayState(): RelayState {
       connections.clear();
     },
 
-    async send({ message, selfSessionId, target, role = "", wait = false }) {
+    async send({ message, selfSessionId, target, role = "" }) {
       const self = requireRegistration(selfSessionId);
       if (!target) throw new Error("target is required: the counterpart's provider or sessionId");
+      const own = connections.get(selfSessionId);
+      if (!own) throw new Error(`Sender session has no live connection: ${selfSessionId}`);
+      const wait = own.waitsForReply;
       const other = resolveTarget(self, target, role);
 
       // Register our own wait before delivering, so a counterpart that answers

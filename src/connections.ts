@@ -10,6 +10,7 @@ type ConnectionFactory = (server: McpServer) => Connection;
 /** Claude Code accepts pushes as `notifications/claude/channel`. */
 const claudeChannel: ConnectionFactory = (server) => ({
   provider: "claude",
+  waitsForReply: false,
   async deliver(message, from) {
     await (server.server.notification as (n: unknown) => Promise<void>)({
       method: "notifications/claude/channel",
@@ -26,6 +27,7 @@ const waitOnly =
   (provider: string): ConnectionFactory =>
   () => ({
     provider,
+    waitsForReply: true,
     async deliver() {
       throw new Error(
         `${provider} sessions cannot receive pushes; the target must be waiting in send`,

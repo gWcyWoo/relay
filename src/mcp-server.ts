@@ -42,7 +42,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     {
       capabilities: { experimental: { "claude/channel": {} } },
       instructions:
-        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Only sessions without a push channel (e.g. codex) pass wait=true to block for the reply. Call unregister to leave.",
+        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Sessions without a push channel (e.g. codex) block in send until the reply arrives; sessions with one (claude) return immediately. Call unregister to leave.",
     },
   );
 
@@ -69,7 +69,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     "send",
     {
       description:
-        "Send a message to a paired session. Pass target (counterpart provider) and role; Relay resolves the session in your project. wait=true blocks until the counterpart's next send and returns its message.",
+        "Send a message to a paired session. Pass target (counterpart provider) and role; Relay resolves the session in your project. Providers without a push channel (e.g. codex) block here until the counterpart answers and get its message back; others return at once.",
       inputSchema: {
         message: z.string().min(1),
         selfSessionId: z.string().min(1),
@@ -78,15 +78,11 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
           .min(1)
           .describe("Counterpart provider, e.g. 'claude'. A sessionId from meta.from is also accepted."),
         role: z.string().default("").describe("Counterpart role, e.g. review or test."),
-        wait: z
-          .boolean()
-          .default(false)
-          .describe("Block until the counterpart replies. Only for sessions without a push channel, e.g. codex."),
       },
     },
-    async ({ message, selfSessionId, target, role, wait }) => {
-      const reply = await relay.send({ message, selfSessionId, target, role, wait });
-      return text(wait ? reply : { sent: true });
+    async ({ message, selfSessionId, target, role }) => {
+      const reply = await relay.send({ message, selfSessionId, target, role });
+      return text(reply === "" ? { sent: true } : reply);
     },
   );
 
