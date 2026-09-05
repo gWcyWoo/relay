@@ -385,6 +385,8 @@ test("a message to an idle codex session is delivered through the codex:// deep 
   const desktop = {
     async open(url: string) { calls.push(`open ${url}`); },
     async submit(app: string) { calls.push(`submit ${app}`); },
+    async appInstalled() { return true; },
+    async canSendKeystrokes() { return true; },
   };
   const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
   const claude = await connect(bridge, "claude");
@@ -418,6 +420,8 @@ test("when the desktop cannot submit, send fails visibly but says the message is
   const desktop = {
     async open() {},
     async submit() { throw new Error("osascript is not allowed to send keystrokes"); },
+    async appInstalled() { return true; },
+    async canSendKeystrokes() { return false; },
   };
   const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
   const claude = await connect(bridge, "claude");
@@ -431,6 +435,33 @@ test("when the desktop cannot submit, send fails visibly but says the message is
     });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /in the Codex composer for thread thread-42 but was not submitted: osascript is not allowed/);
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
+test("register reports only failing setup checks, with fixes", async () => {
+  const desktop = {
+    async open() {},
+    async submit() {},
+    async appInstalled() { return true; },
+    async canSendKeystrokes() { return false; },
+  };
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  try {
+    // Claude's only requirement cannot be checked server-side, so nothing is reported.
+    const cl = JSON.parse(textOf(await claude.callTool({ name: "register", arguments: { sessionId: "cl-1", path: "/p" } })));
+    assert.equal("setupProblems" in cl, false);
+
+    // Codex: the installed-app check passes and stays silent; the failing permission is reported.
+    const cx = JSON.parse(textOf(await codex.callTool({ name: "register", arguments: { sessionId: "t-1", path: "/p" } })));
+    assert.equal(cx.setupProblems.length, 1);
+    assert.equal(cx.setupProblems[0].name, "Accessibility permission for the app that launched Relay");
+    assert.equal(cx.setupProblems[0].ok, false);
+    assert.match(cx.setupProblems[0].fix, /Accessibility/);
   } finally {
     await Promise.allSettled([claude.close(), codex.close()]);
     await bridge.close();

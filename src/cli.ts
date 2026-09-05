@@ -1,8 +1,28 @@
+import { checkSetup, knownProviders, macDesktop, type SetupCheck } from "./connections.ts";
 import { startBridgeHttpServer } from "./http-bridge-server.ts";
 
 function readOptionalOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
+}
+
+function formatSetup(provider: string, checks: SetupCheck[]): string {
+  const lines = checks.map((c) => {
+    const mark = c.ok === true ? "ok  " : c.ok === false ? "FAIL" : "?   ";
+    return `  ${mark} ${c.name}${c.ok === true ? "" : `\n       fix: ${c.fix}`}`;
+  });
+  return [`${provider}:`, ...(lines.length ? lines : ["  (no requirements)"])].join("\n");
+}
+
+/** Check every provider's requirements on this machine and print how to fix what is missing. */
+async function doctor(): Promise<void> {
+  let failed = false;
+  for (const provider of knownProviders()) {
+    const checks = await checkSetup(provider, macDesktop);
+    if (checks.some((c) => c.ok === false)) failed = true;
+    process.stdout.write(`${formatSetup(provider, checks)}\n`);
+  }
+  if (failed) process.exitCode = 1;
 }
 
 async function serve(args: string[]): Promise<void> {
@@ -14,6 +34,11 @@ async function serve(args: string[]): Promise<void> {
   }
   const bridge = await startBridgeHttpServer({ host, port });
   process.stdout.write(`${JSON.stringify({ url: bridge.url.toString() })}\n`);
+  // Real setup failures are reported at startup so nobody discovers them at delivery time.
+  for (const provider of knownProviders()) {
+    const failed = (await checkSetup(provider, macDesktop)).filter((c) => c.ok === false);
+    if (failed.length > 0) process.stderr.write(`setup: ${formatSetup(provider, failed)}\n`);
+  }
 
   await new Promise<void>((resolve) => {
     process.once("SIGINT", resolve);
@@ -51,7 +76,8 @@ async function clear(args: string[]): Promise<void> {
 }
 
 const USAGE = `Usage:
-  relay serve  [--host 127.0.0.1] [--port 8765]   start the relay server
+  relay serve  [--host 127.0.0.1] [--port 8765]   start the relay server (prints setup problems)
+  relay doctor                                    check each provider's requirements on this machine
   relay status [--url http://127.0.0.1:8765]      show registrations, pairs, connections, waiting sends
   relay clear  [--url http://127.0.0.1:8765]      remove all registrations and pairs`;
 
@@ -64,6 +90,8 @@ async function main(): Promise<void> {
       return status(args);
     case "clear":
       return clear(args);
+    case "doctor":
+      return doctor();
     default:
       throw new Error(`Unknown command: ${command ?? ""}\n${USAGE}`);
   }

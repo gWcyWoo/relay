@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createConnection, macDesktop, type DesktopDriver } from "./connections.ts";
+import { checkSetup, createConnection, macDesktop, type DesktopDriver } from "./connections.ts";
 import type { RelayState } from "./relay-state.ts";
 
 interface RelayMcpServerOptions {
@@ -45,14 +45,15 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     {
       capabilities: { experimental: { "claude/channel": {} } },
       instructions:
-        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Sessions without a push channel (e.g. codex) block in send until the reply arrives; sessions with one (claude) return immediately. Call unregister to leave.",
+        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Sessions without a push channel (e.g. codex) block in send until the reply arrives; sessions with one (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave.",
     },
   );
 
   server.registerTool(
     "register",
     {
-      description: "Register this session so other sessions can pair with it.",
+      description:
+        "Register this session so other sessions can pair with it. If the result contains setupProblems, tell the user each one with its fix; otherwise nothing needs attention.",
       inputSchema: {
         sessionId: z.string().min(1).describe("Stable id of this session, kept across reconnects."),
         path: pathSchema,
@@ -64,7 +65,17 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
       relay.register({ sessionId, provider, path: resolvedPath, role });
       relay.connect(sessionId, createConnection(provider, { server, sessionId, desktop }));
       options.onRegister?.(sessionId);
-      return text({ registered: true, sessionId, provider, path: resolvedPath, role });
+      // Only real failures are reported; passing and uncheckable items stay silent
+      // (see `relay doctor` for the full list).
+      const setupProblems = (await checkSetup(provider, desktop)).filter((c) => c.ok === false);
+      return text({
+        registered: true,
+        sessionId,
+        provider,
+        path: resolvedPath,
+        role,
+        ...(setupProblems.length > 0 ? { setupProblems } : {}),
+      });
     },
   );
 
