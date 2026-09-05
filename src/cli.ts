@@ -1,93 +1,18 @@
-import { fileURLToPath } from "node:url";
 import { startBridgeHttpServer } from "./http-bridge-server.ts";
-import { createBridgePair } from "./pair-store.ts";
-import { spawnCodexAppServerClient } from "./spawn-codex-app-server.ts";
-
-const internalStorePath =
-  process.env.RELAY_STORE_PATH ??
-  fileURLToPath(new URL("../.relay.sqlite", import.meta.url));
-
-function readOption(args: string[], name: string): string {
-  const index = args.indexOf(name);
-  const value = index === -1 ? undefined : args[index + 1];
-  if (!value) {
-    throw new Error(`Missing required option: ${name}`);
-  }
-  return value;
-}
 
 function readOptionalOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
 }
 
-function readAssignment(args: string[], name: string): string | undefined {
-  const prefix = `${name}=`;
-  return args.find((value) => value.startsWith(prefix))?.slice(prefix.length);
-}
-
-function readRepeatedOption(args: string[], name: string): string[] {
-  return args.flatMap((value, index) =>
-    value === name && args[index + 1] ? [args[index + 1]] : [],
-  );
-}
-
-function readEndpoints(args: string[]): [string, string] {
-  const storeIndex = args.indexOf("--store");
-  const endpoints = args.filter(
-    (_value, index) => index !== storeIndex && index !== storeIndex + 1,
-  );
-  if (endpoints.length !== 2) {
-    throw new Error("pair requires exactly two endpoints");
-  }
-  return [endpoints[0], endpoints[1]];
-}
-
-function pair(args: string[]): void {
-  const storePath = readOptionalOption(args, "--store") ?? internalStorePath;
-  const claudeSessionId = readAssignment(args, "--claude");
-  const codexThreadId = readAssignment(args, "--codex");
-  const usesShortOptions = args.some(
-    (value) => value.startsWith("--claude") || value.startsWith("--codex"),
-  );
-  if (usesShortOptions && !claudeSessionId) {
-    throw new Error("Missing required option: --claude");
-  }
-  if (usesShortOptions && !codexThreadId) {
-    throw new Error("Missing required option: --codex");
-  }
-  const [leftEndpoint, rightEndpoint] = usesShortOptions
-    ? [`claude:${claudeSessionId}`, `codex:${codexThreadId}`]
-    : readEndpoints(args);
-  const bridgeId = createBridgePair({
-    storePath,
-    leftEndpoint,
-    rightEndpoint,
-  });
-
-  process.stdout.write(`${JSON.stringify({ bridgeId })}\n`);
-}
-
 async function serve(args: string[]): Promise<void> {
-  const storePath = readOptionalOption(args, "--store") ?? internalStorePath;
   const host = readOptionalOption(args, "--host") ?? "127.0.0.1";
   const portText = readOptionalOption(args, "--port") ?? "8765";
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`Invalid port: ${portText}`);
   }
-  const command = readOptionalOption(args, "--codex-command") ?? "codex";
-  const commandArgs = readRepeatedOption(args, "--codex-arg");
-  const appServer = spawnCodexAppServerClient({
-    command,
-    args: commandArgs.length > 0 ? commandArgs : ["app-server"],
-  });
-  const bridge = await startBridgeHttpServer({
-    storePath,
-    codexAppServer: appServer.client,
-    host,
-    port,
-  });
+  const bridge = await startBridgeHttpServer({ host, port });
   process.stdout.write(`${JSON.stringify({ url: bridge.url.toString() })}\n`);
 
   await new Promise<void>((resolve) => {
@@ -95,20 +20,53 @@ async function serve(args: string[]): Promise<void> {
     process.once("SIGTERM", resolve);
   });
   await bridge.close();
-  await appServer.close();
 }
+
+function adminUrl(args: string[]): URL {
+  const base = readOptionalOption(args, "--url") ?? "http://127.0.0.1:8765";
+  return new URL("/admin/state", base);
+}
+
+async function callAdmin(url: URL, method: string): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method });
+  } catch (error) {
+    throw new Error(`Relay is not reachable at ${url.origin}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!response.ok) throw new Error(`Relay answered ${response.status} for ${method} ${url.pathname}`);
+  return response.json();
+}
+
+/** Print the running server's registrations, pairs, connections and waiting sends. */
+async function status(args: string[]): Promise<void> {
+  const state = await callAdmin(adminUrl(args), "GET");
+  process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
+}
+
+/** Drop every registration and pair on the running server; waiting sends get an error. */
+async function clear(args: string[]): Promise<void> {
+  const result = await callAdmin(adminUrl(args), "DELETE");
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+const USAGE = `Usage:
+  relay serve  [--host 127.0.0.1] [--port 8765]   start the relay server
+  relay status [--url http://127.0.0.1:8765]      show registrations, pairs, connections, waiting sends
+  relay clear  [--url http://127.0.0.1:8765]      remove all registrations and pairs`;
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
-  if (command === "pair") {
-    pair(args);
-    return;
+  switch (command) {
+    case "serve":
+      return serve(args);
+    case "status":
+      return status(args);
+    case "clear":
+      return clear(args);
+    default:
+      throw new Error(`Unknown command: ${command ?? ""}\n${USAGE}`);
   }
-  if (command === "serve") {
-    await serve(args);
-    return;
-  }
-  throw new Error(`Unknown command: ${command ?? ""}`);
 }
 
 main().catch((error) => {
