@@ -2,6 +2,7 @@ import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   createRelayState,
+  STALE_WAIT_NOTE,
   type Connection,
   type RelayState,
   type Sender,
@@ -198,5 +199,56 @@ describe("relay state", () => {
       relay.send({ message: "again", selfSessionId: "cx", target: "claude", role: "review" }),
       /already waiting in send/,
     );
+  });
+});
+
+describe("relay state: counterpart that stopped reading its send", () => {
+  let relay: RelayState;
+  let deliver: ReturnType<typeof mock.fn<(message: string, from: Sender) => Promise<void>>>;
+  let ended: boolean;
+  beforeEach(() => {
+    relay = createRelayState();
+    ended = false;
+    deliver = mock.fn(async (_message: string, _from: Sender) => {});
+    relay.register({ sessionId: "cx", provider: "codex", path: "/p", role: "" });
+    relay.connect("cx", {
+      provider: "codex",
+      waitsForReply: true,
+      deliver,
+      attending: async () => !ended,
+    });
+    relay.register({ sessionId: "cl", provider: "claude", path: "/p", role: "review" });
+    relay.connect("cl", pushConnection().connection);
+  });
+
+  it("a reply to a session still reading its send is returned from that send", async () => {
+    const pending = relay.send({ message: "q", selfSessionId: "cx", target: "claude", role: "review" });
+    await relay.send({ message: "a", selfSessionId: "cl", target: "codex", role: "review" });
+    assert.equal(await pending, "a");
+    assert.equal(deliver.mock.calls.length, 0);
+  });
+
+  it("a reply after the session stopped reading is pushed, and the stale send is told so", async () => {
+    const pending = relay.send({ message: "q", selfSessionId: "cx", target: "claude", role: "review" });
+    ended = true;
+    await relay.send({ message: "a", selfSessionId: "cl", target: "codex", role: "review" });
+    assert.equal(deliver.mock.calls[0].arguments[0], "a");
+    assert.equal(await pending, STALE_WAIT_NOTE);
+    assert.deepEqual(relay.snapshot().waiting, []);
+  });
+
+  it("if the push fails, the sender sees the error and the stale send stays open", async () => {
+    const pending = relay.send({ message: "q", selfSessionId: "cx", target: "claude", role: "review" });
+    ended = true;
+    deliver.mock.mockImplementation(async () => {
+      throw new Error("composer not submitted");
+    });
+    await assert.rejects(
+      relay.send({ message: "a", selfSessionId: "cl", target: "codex", role: "review" }),
+      /composer not submitted/,
+    );
+    assert.deepEqual(relay.snapshot().waiting, ["cx"]);
+    relay.clear();
+    await assert.rejects(pending, /unregistered|cleared/);
   });
 });

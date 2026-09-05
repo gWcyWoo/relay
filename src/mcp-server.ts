@@ -45,7 +45,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     {
       capabilities: { experimental: { "claude/channel": {} } },
       instructions:
-        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Sessions without a push channel (e.g. codex) block in send until the reply arrives; sessions with one (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave.",
+        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Nothing relayed may stay hidden from the user: the pushed message is not rendered by the client, so start your response by showing who sent it and its full text; and after you reply with send, show the full text you sent, not a summary. Sessions without a push channel (e.g. codex) block in send until the reply arrives, so keep waiting on that call; if the counterpart answers while you are not waiting, or after you ended the turn that called send, the answer arrives as a new turn in your session instead. Sessions with a push channel (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave.",
     },
   );
 
@@ -83,7 +83,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     "send",
     {
       description:
-        "Send a message to a paired session. Pass target (counterpart provider) and role; Relay resolves the session in your project. Providers without a push channel (e.g. codex) block here until the counterpart answers and get its message back; others return at once.",
+        "Send a message to a paired session. Pass target (counterpart provider) and role; Relay resolves the session in your project. Codex blocks here until the counterpart answers and gets its message back, so keep waiting on this call; if the answer comes while Codex is not waiting, or after Codex ended the turn that called send, it arrives as a new turn in the Codex thread. Claude returns at once.",
       inputSchema: {
         message: z.string().min(1),
         selfSessionId: z.string().min(1),

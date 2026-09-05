@@ -8,7 +8,8 @@
  *    One side may have several counterparts (many Codex sessions asking one Claude reviewer).
  *  - connections: sessionId -> delivery strategy for that provider (see connections.ts)
  * Plus `waiting`: sessions blocked inside send because their strategy waits for the reply
- * (providers without a push channel); resolved by the counterpart's next send.
+ * (providers without a push channel); resolved by the counterpart's next send, unless the
+ * strategy reports the session stopped reading, in which case that send is pushed instead.
  */
 
 export interface Registration {
@@ -33,7 +34,17 @@ export interface Connection {
   deliver(message: string, from: Sender): Promise<void>;
   /** Whether this provider's send blocks until the counterpart answers (true when it cannot be pushed to). */
   waitsForReply: boolean;
+  /**
+   * Whether the session is still reading a send it started at `since`. Absent means always.
+   * Providers whose sessions can end their turn while a send is still open (codex) report
+   * false once that turn ended; the reply is then pushed via `deliver` instead.
+   */
+  attending?(since: Date): Promise<boolean>;
 }
+
+/** Returned to a blocked send whose session stopped reading before the reply came. */
+export const STALE_WAIT_NOTE =
+  "[Relay] The reply arrived after you stopped reading this send; it was delivered to your session as a new turn instead.";
 
 export interface SendOptions {
   message: string;
@@ -70,6 +81,8 @@ export interface RelayState {
 }
 
 interface Waiting {
+  /** When the send was registered; strategies use it to tell whether the session still reads it. */
+  since: Date;
   resolve(message: string): void;
   reject(error: Error): void;
 }
@@ -219,17 +232,22 @@ export function createRelayState(): RelayState {
           throw new Error(`Session ${selfSessionId} is already waiting in send`);
         }
         reply = new Promise<string>((resolve, reject) => {
-          waiting.set(selfSessionId, { resolve, reject });
+          waiting.set(selfSessionId, { since: new Date(), resolve, reject });
         });
       }
 
       try {
         const waitingOther = waiting.get(other);
-        if (waitingOther) {
+        const connection = connections.get(other);
+        // A blocked counterpart gets the message as its send's return value, unless its
+        // strategy knows it stopped reading (e.g. codex ended the turn that called send).
+        const reading =
+          waitingOther !== undefined &&
+          (connection?.attending === undefined || (await connection.attending(waitingOther.since)));
+        if (waitingOther && reading) {
           waiting.delete(other);
           waitingOther.resolve(message);
         } else {
-          const connection = connections.get(other);
           if (!connection) throw new Error(`Target session has no live connection: ${other}`);
           await connection.deliver(message, {
             sessionId: selfSessionId,
@@ -237,6 +255,11 @@ export function createRelayState(): RelayState {
             role,
             senderRole: self.role,
           });
+          if (waitingOther) {
+            // Delivered elsewhere; close the stale send so its caller sees why nothing came back.
+            waiting.delete(other);
+            waitingOther.resolve(STALE_WAIT_NOTE);
+          }
         }
       } catch (error) {
         waiting.delete(selfSessionId);

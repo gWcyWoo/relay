@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Connection } from "./relay-state.ts";
@@ -22,6 +24,35 @@ export interface DesktopDriver {
   appInstalled(appName: string): Promise<boolean>;
   /** Whether this process may send keystrokes (macOS Accessibility permission). */
   canSendKeystrokes(): Promise<boolean>;
+  /**
+   * Whether the Codex turn that was running at `since` in the given thread has ended.
+   * Read from Codex's own thread history on this machine; throws if it cannot be read.
+   */
+  codexTurnEnded(threadId: string, since: Date): Promise<boolean>;
+}
+
+/** Codex keeps per-turn status in this database; a turn gets its row when it ends. */
+export function codexHistoryPath(): string {
+  return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "thread_history_1.sqlite");
+}
+
+let sqlite: Promise<typeof import("node:sqlite")> | undefined;
+
+/** node:sqlite, loaded on first use without its ExperimentalWarning (which would read as a problem in `relay doctor`). */
+function loadSqlite(): Promise<typeof import("node:sqlite")> {
+  sqlite ??= (async () => {
+    const original = process.emitWarning;
+    process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+      if (String(warning).includes("SQLite is an experimental feature")) return;
+      (original as (warning: string | Error, ...rest: unknown[]) => void).call(process, warning, ...rest);
+    }) as typeof process.emitWarning;
+    try {
+      return await import("node:sqlite");
+    } finally {
+      process.emitWarning = original;
+    }
+  })();
+  return sqlite;
 }
 
 export const macDesktop: DesktopDriver = {
@@ -52,6 +83,21 @@ export const macDesktop: DesktopDriver = {
       return true;
     } catch {
       return false;
+    }
+  },
+  async codexTurnEnded(threadId, since) {
+    const { DatabaseSync } = await loadSqlite();
+    const db = new DatabaseSync(codexHistoryPath(), { readOnly: true });
+    try {
+      const at = Math.floor(since.getTime() / 1000);
+      const row = db
+        .prepare(
+          "select 1 from thread_turns where thread_id = ? and started_at <= ? and completed_at >= ? limit 1",
+        )
+        .get(threadId, at, at);
+      return row !== undefined;
+    } finally {
+      db.close();
     }
   },
 };
@@ -109,12 +155,16 @@ const claude: ProviderStrategy = {
  * Codex desktop (ChatGPT.app). Its MCP client cannot be pushed to, but the app
  * handles `codex://threads/<id>?prompt=` by opening that thread with the prompt
  * prefilled, and the Codex sessionId is its thread id. A request from Codex still
- * blocks in send for the reply; this path is for messages sent while Codex is idle.
+ * blocks in send for the reply; this path is for messages sent while Codex is idle,
+ * including a reply that comes after Codex ended the turn that called send.
  */
 const codex: ProviderStrategy = {
   connect: ({ sessionId, desktop }) => ({
     provider: "codex",
     waitsForReply: true,
+    // Codex may end its turn while the send is still open; the turn's end is recorded
+    // in its thread history, so a reply after that point goes through the deep link.
+    attending: async (since) => !(await desktop.codexTurnEnded(sessionId, since)),
     async deliver(message, from) {
       // Replying with the pair label hits the existing pair; with the sender's registered
       // role it resolves through the registry. Either reaches the sender.
@@ -144,6 +194,15 @@ const codex: ProviderStrategy = {
       name: "Accessibility permission for the app that launched Relay",
       fix: "System Settings > Privacy & Security > Accessibility: enable the app you start Relay from (e.g. Terminal). Without it messages land in the Codex composer but are not submitted.",
       check: () => desktop.canSendKeystrokes(),
+    },
+    {
+      name: "Codex thread history readable",
+      fix: `Relay reads ${codexHistoryPath()} to tell whether a Codex turn is still waiting in send. Run Codex once so the file exists, or set CODEX_HOME to its directory.`,
+      check: () =>
+        desktop.codexTurnEnded("relay-setup-probe", new Date()).then(
+          () => true,
+          () => false,
+        ),
     },
     {
       name: "Codex registers with its thread id as sessionId",

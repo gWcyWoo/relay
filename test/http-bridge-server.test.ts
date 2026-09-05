@@ -16,6 +16,15 @@ const ChannelNotificationSchema = z.object({
 
 type Received = { content: string; from: string; provider: string; role: string };
 
+/** Host driver for tests: no real app, and every Codex turn is still running. */
+const idleDesktop = {
+  async open() {},
+  async submit() {},
+  async appInstalled() { return true; },
+  async canSendKeystrokes() { return true; },
+  async codexTurnEnded() { return false; },
+};
+
 async function connect(bridge: BridgeHttpServer, provider: string, name = provider) {
   const client = new Client({ name, version: "1.0.0" });
   await client.connect(
@@ -43,7 +52,7 @@ function textOf(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 test("Codex sends with target, Claude gets a channel push and answers with send", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   const pushed = nextChannelMessage(claude);
@@ -81,7 +90,7 @@ test("Codex sends with target, Claude gets a channel push and answers with send"
 });
 
 test("codex send waits for the reply while claude send returns at once", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   const pushed = nextChannelMessage(claude);
@@ -109,7 +118,7 @@ test("codex send waits for the reply while claude send returns at once", async (
 });
 
 test("every provider gets the same tools and any provider name is accepted", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const claude = await connect(bridge, "claude");
   const gemini = await connect(bridge, "gemini");
   try {
@@ -123,7 +132,7 @@ test("every provider gets the same tools and any provider name is accepted", asy
 });
 
 test("register resolves path from MCP roots when path is empty", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const claude = new Client(
     { name: "claude", version: "1.0.0" },
     { capabilities: { roots: {} } },
@@ -147,7 +156,7 @@ test("register resolves path from MCP roots when path is empty", async () => {
 });
 
 test("register without path fails visibly when client has no roots", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const codex = await connect(bridge, "codex");
   try {
     const result = await codex.callTool({
@@ -163,7 +172,7 @@ test("register without path fails visibly when client has no roots", async () =>
 });
 
 test("send with no matching counterpart fails visibly", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const codex = await connect(bridge, "codex");
   try {
     await codex.callTool({ name: "register", arguments: { sessionId: "cx-1", path: "/p" } });
@@ -192,6 +201,7 @@ test("a session that drops without DELETE keeps its registration and pair; re-re
     host: "127.0.0.1",
     port: 0,
     disconnectGraceMs: 50,
+    desktop: idleDesktop,
   });
   const claude1 = await connect(bridge, "claude", "claude-1");
   const codex = await connect(bridge, "codex");
@@ -245,7 +255,7 @@ test("a session that drops without DELETE keeps its registration and pair; re-re
 });
 
 test("unregister drops the pair and fails the waiting counterpart", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   const pushed = nextChannelMessage(claude);
@@ -280,7 +290,7 @@ test("unregister drops the pair and fails the waiting counterpart", async () => 
 });
 
 test("admin endpoints expose and clear the relay state", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   const pushed = nextChannelMessage(claude);
@@ -318,7 +328,7 @@ test("admin endpoints expose and clear the relay state", async () => {
 });
 
 test("a late register on a claude transport is answered 404 once so Claude Code re-initializes", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, claudeReinitAfterMs: 50 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, claudeReinitAfterMs: 50, desktop: idleDesktop });
   const stale = await connect(bridge, "claude", "stale");
   let fresh: Client | undefined;
   try {
@@ -345,7 +355,7 @@ test("a late register on a claude transport is answered 404 once so Claude Code 
 });
 
 test("when a registered transport closes, the one fresh unregistered transport inherits the registration", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, disconnectGraceMs: 50 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, disconnectGraceMs: 50, desktop: idleDesktop });
   const throwaway = await connect(bridge, "claude", "throwaway");
   const codex = await connect(bridge, "codex");
   let replacement: Client | undefined;
@@ -387,6 +397,7 @@ test("a message to an idle codex session is delivered through the codex:// deep 
     async submit(app: string) { calls.push(`submit ${app}`); },
     async appInstalled() { return true; },
     async canSendKeystrokes() { return true; },
+    async codexTurnEnded() { return false; },
   };
   const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
   const claude = await connect(bridge, "claude");
@@ -422,6 +433,7 @@ test("when the desktop cannot submit, send fails visibly but says the message is
     async submit() { throw new Error("osascript is not allowed to send keystrokes"); },
     async appInstalled() { return true; },
     async canSendKeystrokes() { return false; },
+    async codexTurnEnded() { return false; },
   };
   const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
   const claude = await connect(bridge, "claude");
@@ -447,6 +459,7 @@ test("register reports only failing setup checks, with fixes", async () => {
     async submit() {},
     async appInstalled() { return true; },
     async canSendKeystrokes() { return false; },
+    async codexTurnEnded() { return false; },
   };
   const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
   const claude = await connect(bridge, "claude");
@@ -469,7 +482,7 @@ test("register reports only failing setup checks, with fixes", async () => {
 });
 
 test("an unknown session ID gets 404 so the client re-initializes", async () => {
-  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0 });
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop: idleDesktop });
   try {
     const request = (headers: Record<string, string>) =>
       fetch(new URL("/mcp/claude", bridge.url), {
@@ -488,6 +501,49 @@ test("an unknown session ID gets 404 so the client re-initializes", async () => 
     const missing = await request({});
     assert.equal(missing.status, 400);
   } finally {
+    await bridge.close();
+  }
+});
+
+test("a reply that comes after codex ended the turn that called send goes through the deep link", async () => {
+  const calls: string[] = [];
+  let turnEnded = false;
+  const desktop = {
+    ...idleDesktop,
+    async open(url: string) { calls.push(url); },
+    async codexTurnEnded(threadId: string) { return threadId === "thread-42" && turnEnded; },
+  };
+  const bridge = await startBridgeHttpServer({ host: "127.0.0.1", port: 0, desktop });
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  try {
+    const pushed = new Promise<string>((resolve) => {
+      claude.setNotificationHandler(ChannelNotificationSchema, (n) => resolve(n.params.content));
+    });
+    await claude.callTool({ name: "register", arguments: { sessionId: "cl-1", path: "/p", role: "architect" } });
+    await codex.callTool({ name: "register", arguments: { sessionId: "thread-42", path: "/p" } });
+
+    const blocked = codex.callTool({
+      name: "send",
+      arguments: { message: "how should retry work?", selfSessionId: "thread-42", target: "claude", role: "architect" },
+    });
+    assert.equal(await pushed, "how should retry work?");
+
+    // Codex writes its summary and ends the turn; the cell stays open but nobody reads it.
+    turnEnded = true;
+    const reply = await claude.callTool({
+      name: "send",
+      arguments: { message: "bound retries to the new candidate", selfSessionId: "cl-1", target: "codex", role: "architect" },
+    });
+    assert.equal(reply.isError, undefined);
+
+    assert.equal(calls.length, 1);
+    const url = new URL(calls[0]);
+    assert.equal(url.pathname, "/thread-42");
+    assert.match(url.searchParams.get("prompt") ?? "", /bound retries to the new candidate$/);
+    assert.match(textOf(await blocked), /^\[Relay\] The reply arrived after you stopped reading this send/);
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
     await bridge.close();
   }
 });
