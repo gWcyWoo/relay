@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { checkSetup, codexHistoryPath, macDesktop } from "../src/connections.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { checkSetup, codexHistoryPath, codexStatePath, macDesktop, returnKeystrokeScript } from "../src/connections.ts";
 
 // Codex's thread_turns table, as written by Codex 0.153 (a row appears when a turn ends).
 const SCHEMA = `create table thread_turns (
@@ -58,4 +59,60 @@ test("a missing Codex history is a visible error and a failing setup check", asy
   const history = checks.find((c) => c.name === "Codex thread history readable");
   assert.equal(history?.ok, false);
   assert.match(history?.fix ?? "", /thread_history_1\.sqlite/);
+});
+
+test("codexFollowUpMode reads [desktop] followUpQueueMode from config.toml; absent means the app default, steer", async () => {
+  mkdirSync(home, { recursive: true });
+  const config = join(home, "config.toml");
+  writeFileSync(config, "[features]\nsteer = true\n\n[desktop]\nconversationDetailMode = \"STEPS\"\nfollowUpQueueMode = \"queue\"\n");
+  assert.equal(await macDesktop.codexFollowUpMode(), "queue");
+  writeFileSync(config, "[desktop]\nfollowUpQueueMode = \"interrupt\"\n[other]\nfollowUpQueueMode = \"queue\"\n");
+  assert.equal(await macDesktop.codexFollowUpMode(), "interrupt");
+  writeFileSync(config, "[desktop]\nconversationDetailMode = \"STEPS\"\n");
+  assert.equal(await macDesktop.codexFollowUpMode(), "steer");
+  rmSync(config);
+  assert.equal(await macDesktop.codexFollowUpMode(), "steer");
+  writeFileSync(config, "[desktop]\nfollowUpQueueMode = \"later\"\n");
+  await assert.rejects(macDesktop.codexFollowUpMode(), /followUpQueueMode is "later"; expected queue, steer or interrupt/);
+});
+
+test("the submit keystroke carries the requested modifiers", () => {
+  assert.match(returnKeystrokeScript("ChatGPT", { command: false, shift: false }), /keystroke return$/);
+  assert.match(returnKeystrokeScript("ChatGPT", { command: true, shift: false }), /keystroke return using \{command down\}$/);
+  assert.match(returnKeystrokeScript("ChatGPT", { command: true, shift: true }), /keystroke return using \{command down, shift down\}$/);
+});
+
+test("codexComposerEnterBehavior reads [desktop] composerEnterBehavior; absent means enter", async () => {
+  const config = join(home, "config.toml");
+  writeFileSync(config, "[desktop]\ncomposerEnterBehavior = \"cmdAlways\"\n");
+  assert.equal(await macDesktop.codexComposerEnterBehavior(), "cmdAlways");
+  writeFileSync(config, "[desktop]\nfollowUpQueueMode = \"queue\"\n");
+  assert.equal(await macDesktop.codexComposerEnterBehavior(), "enter");
+  writeFileSync(config, "[desktop]\ncomposerEnterBehavior = \"tab\"\n");
+  await assert.rejects(macDesktop.codexComposerEnterBehavior(), /composerEnterBehavior is "tab"; expected enter, cmdIfMultiline or cmdAlways/);
+  rmSync(config);
+});
+
+test("codexTurnRunning tells whether the thread's last turn is still open, reading its rollout from the end", async () => {
+  const rollout = join(home, "rollout-thread-r.jsonl");
+  const db = new DatabaseSync(codexStatePath());
+  db.exec("create table threads (id text primary key, rollout_path text not null)");
+  db.prepare("insert into threads values (?, ?)").run("thread-r", rollout);
+  db.close();
+  const event = (type: string) => JSON.stringify({ timestamp: "t", type: "event_msg", payload: { type, turn_id: "x" } }) + "\n";
+  const filler = JSON.stringify({ type: "response_item", payload: { type: "message", content: "x".repeat(2000) } }) + "\n";
+
+  writeFileSync(rollout, event("task_started") + event("task_complete"));
+  assert.equal(await macDesktop.codexTurnRunning("thread-r"), false);
+  writeFileSync(rollout, event("task_started") + event("task_complete") + event("task_started") + filler.repeat(100));
+  assert.equal(await macDesktop.codexTurnRunning("thread-r"), true, "task_started far before the end of the file still counts");
+  writeFileSync(rollout, event("task_started") + event("turn_aborted"));
+  assert.equal(await macDesktop.codexTurnRunning("thread-r"), false);
+  writeFileSync(rollout, "");
+  assert.equal(await macDesktop.codexTurnRunning("thread-r"), false);
+  await assert.rejects(macDesktop.codexTurnRunning("thread-z"), /No Codex thread thread-z in/);
+  rmSync(codexStatePath());
+  await assert.rejects(macDesktop.codexTurnRunning("thread-r"), /unable to open database/);
+  const checks = await checkSetup("codex", macDesktop);
+  assert.equal(checks.find((c) => c.name === "Codex thread state readable")?.ok, false);
 });

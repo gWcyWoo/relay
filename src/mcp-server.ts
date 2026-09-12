@@ -1,36 +1,19 @@
-import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { checkSetup, createConnection, macDesktop, type DesktopDriver } from "./connections.ts";
+import type { Peering } from "./peering.ts";
 import type { RelayState } from "./relay-state.ts";
 
 interface RelayMcpServerOptions {
   /** Provider name taken from the endpoint path, e.g. "claude" or "codex". */
   provider: string;
   relay: RelayState;
+  /** Binds sessions across relays and tells peers when a session leaves. */
+  peering: Pick<Peering, "bind" | "unregister">;
   /** Called with the sessionId once this MCP session registers, so the bridge can drop its connection on close. */
   onRegister?: (sessionId: string) => void;
   /** Host actions for desktop-driven providers; defaults to the real macOS driver. */
   desktop?: DesktopDriver;
-}
-
-const pathSchema = z
-  .string()
-  .default("")
-  .describe(
-    "Project directory path. Leave empty to resolve from the client's MCP roots; pass explicitly if the client does not expose roots.",
-  );
-
-async function resolvePath(server: McpServer, path: string): Promise<string> {
-  if (path !== "") return path;
-  if (!server.server.getClientCapabilities()?.roots) {
-    throw new Error("path is required: this client does not support MCP roots");
-  }
-  const { roots } = await server.server.listRoots();
-  if (roots.length === 0) {
-    throw new Error("path is required: client returned no MCP roots");
-  }
-  return fileURLToPath(roots[0].uri);
 }
 
 function text(value: unknown) {
@@ -38,14 +21,14 @@ function text(value: unknown) {
 }
 
 export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer {
-  const { provider, relay } = options;
+  const { provider, relay, peering } = options;
   const desktop = options.desktop ?? macDesktop;
   const server = new McpServer(
-    { name: "relay", version: "0.3.0" },
+    { name: "relay", version: "0.4.0" },
     {
       capabilities: { experimental: { "claude/channel": {} } },
       instructions:
-        "You are connected to Relay. Call register with your sessionId, path and role. Call send(message, selfSessionId, target, role) to message another session: target is the counterpart's provider (e.g. 'claude') and role its role (e.g. 'review'); Relay finds that session in your project and pairs you, so every send looks the same. A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and that role, or target=meta.from when several requesters share the role. Nothing relayed may stay hidden from the user: the pushed message is not rendered by the client, so start your response by showing who sent it and its full text; and after you reply with send, show the full text you sent, not a summary. Sessions without a push channel (e.g. codex) block in send until the reply arrives, so keep waiting on that call; if the counterpart answers while you are not waiting, or after you ended the turn that called send, the answer arrives as a new turn in your session instead. Sessions with a push channel (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave.",
+        "You are connected to Relay. Call register(sessionId, role) once; the result carries this session's token, which the user hands to a counterpart session. To bind to a counterpart, call register again with that session's token: each token adds one binding, your own token never changes, and the counterpart may be on another machine. Then send(message, selfSessionId, target, role, urgent) reaches a bound session: target is its provider (e.g. 'claude') and role its role (e.g. 'review'); a bound sessionId, such as meta.from of a received push, is also accepted. Set urgent only when the message must interrupt the counterpart's current work (a Codex turn is steered instead of the message waiting behind it). A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using target=meta.provider and role=meta.role, or target=meta.from when several counterparts share them. Nothing relayed may stay hidden from the user: the pushed message is not rendered by the client, so start your response by showing who sent it and its full text; and after you reply with send, show the full text you sent, not a summary. Sessions without a push channel (e.g. codex) block in send until the reply arrives, so keep waiting on that call; after 4 minutes without a reply the call returns a note and the reply, when it comes, arrives as a new turn in your session, as does an answer that comes while you are not waiting or after you ended the turn that called send. Sending again while a reply is pending is fine: the newer send takes over the wait. Sessions with a push channel (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave; bindings on both sides are dropped.",
     },
   );
 
@@ -53,18 +36,21 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     "register",
     {
       description:
-        "Register this session so other sessions can pair with it. If the result contains setupProblems, tell the user each one with its fix; otherwise nothing needs attention.",
+        "Register this session and get its token, or bind it to a counterpart by passing that session's token. If the result contains setupProblems, tell the user each one with its fix; otherwise nothing needs attention.",
       inputSchema: {
         sessionId: z.string().min(1).describe("Stable id of this session, kept across reconnects."),
-        path: pathSchema,
-        role: z.string().default("").describe("Role label such as review or test; used to match pairs."),
+        role: z.string().default("").describe("Role label such as review or executor; counterparts address you by it."),
+        token: z
+          .string()
+          .optional()
+          .describe("A counterpart session's token (secret@host:port) to bind to. Omit to only register."),
       },
     },
-    async ({ sessionId, path, role }) => {
-      const resolvedPath = await resolvePath(server, path);
-      relay.register({ sessionId, provider, path: resolvedPath, role });
+    async ({ sessionId, role, token }) => {
+      const registration = relay.register({ sessionId, provider, role });
       relay.connect(sessionId, createConnection(provider, { server, sessionId, desktop }));
       options.onRegister?.(sessionId);
+      if (token !== undefined) await peering.bind(registration, token);
       // Only real failures are reported; passing and uncheckable items stay silent
       // (see `relay doctor` for the full list).
       const setupProblems = (await checkSetup(provider, desktop)).filter((c) => c.ok === false);
@@ -72,8 +58,14 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
         registered: true,
         sessionId,
         provider,
-        path: resolvedPath,
         role,
+        token: registration.token,
+        bound: relay.bindingsOf(sessionId).map(({ sessionId, provider, role, address }) => ({
+          sessionId,
+          provider,
+          role,
+          ...(address === undefined ? {} : { address }),
+        })),
         ...(setupProblems.length > 0 ? { setupProblems } : {}),
       });
     },
@@ -83,19 +75,23 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     "send",
     {
       description:
-        "Send a message to a paired session. Pass target (counterpart provider) and role; Relay resolves the session in your project. Codex blocks here until the counterpart answers and gets its message back, so keep waiting on this call; if the answer comes while Codex is not waiting, or after Codex ended the turn that called send, it arrives as a new turn in the Codex thread. Claude returns at once.",
+        "Send a message to a bound session. Pass target (counterpart provider, or a bound sessionId) and role. Codex blocks here until the counterpart answers and gets its message back, so keep waiting on this call; after 4 minutes without an answer it returns a note and the answer arrives later as a new turn in the Codex thread, as it does when the answer comes while Codex is not waiting. Claude returns at once.",
       inputSchema: {
         message: z.string().min(1),
         selfSessionId: z.string().min(1),
         target: z
           .string()
           .min(1)
-          .describe("Counterpart provider, e.g. 'claude'. A sessionId from meta.from is also accepted."),
-        role: z.string().default("").describe("Counterpart role, e.g. review or test."),
+          .describe("Counterpart provider, e.g. 'claude'. A bound sessionId from meta.from is also accepted."),
+        role: z.string().default("").describe("Counterpart role, e.g. review or executor; empty matches any."),
+        urgent: z
+          .boolean()
+          .default(false)
+          .describe("Set true whenever the user marks the message as urgent, priority or 插队: it interrupts the counterpart's current work (Codex: steers the running turn) instead of queueing behind it."),
       },
     },
-    async ({ message, selfSessionId, target, role }) => {
-      const reply = await relay.send({ message, selfSessionId, target, role });
+    async ({ message, selfSessionId, target, role, urgent }) => {
+      const reply = await relay.send({ message, selfSessionId, target, role, urgent });
       return text(reply === "" ? { sent: true } : reply);
     },
   );
@@ -103,11 +99,11 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
   server.registerTool(
     "unregister",
     {
-      description: "Leave Relay. Pairs involving this session are dropped and waiting counterparts get an error.",
+      description: "Leave Relay. Bindings involving this session are dropped on both sides and waiting counterparts get an error.",
       inputSchema: { sessionId: z.string().min(1) },
     },
     async ({ sessionId }) => {
-      relay.unregister(sessionId);
+      await peering.unregister(sessionId);
       return text({ unregistered: true, sessionId });
     },
   );

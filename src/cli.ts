@@ -26,14 +26,17 @@ async function doctor(): Promise<void> {
 }
 
 async function serve(args: string[]): Promise<void> {
-  const host = readOptionalOption(args, "--host") ?? "127.0.0.1";
+  const host = readOptionalOption(args, "--host") ?? "0.0.0.0";
+  const advertise = readOptionalOption(args, "--advertise");
   const portText = readOptionalOption(args, "--port") ?? "8765";
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`Invalid port: ${portText}`);
   }
-  const bridge = await startBridgeHttpServer({ host, port });
-  process.stdout.write(`${JSON.stringify({ url: bridge.url.toString() })}\n`);
+  const bridge = await startBridgeHttpServer({ host, port, advertise });
+  process.stdout.write(
+    `${JSON.stringify({ url: bridge.url.toString(), advertise: `${bridge.advertise.host}:${bridge.advertise.port}` })}\n`,
+  );
   // Real setup failures are reported at startup so nobody discovers them at delivery time.
   for (const provider of knownProviders()) {
     const failed = (await checkSetup(provider, macDesktop)).filter((c) => c.ok === false);
@@ -63,23 +66,25 @@ async function callAdmin(url: URL, method: string): Promise<unknown> {
   return response.json();
 }
 
-/** Print the running server's registrations, pairs, connections and waiting sends. */
+/** Print the running server's registrations, bindings, connections and waiting sends. */
 async function status(args: string[]): Promise<void> {
   const state = await callAdmin(adminUrl(args), "GET");
   process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
 }
 
-/** Drop every registration and pair on the running server; waiting sends get an error. */
+/** Drop every registration and binding on the running server; waiting sends get an error. */
 async function clear(args: string[]): Promise<void> {
   const result = await callAdmin(adminUrl(args), "DELETE");
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 const USAGE = `Usage:
-  relay serve  [--host 127.0.0.1] [--port 8765]   start the relay server (prints setup problems)
+  relay serve  [--host 0.0.0.0] [--port 8765] [--advertise <host[:port]>]
+                                                  start the relay server; tokens carry the advertised
+                                                  address (default: this machine's LAN address)
   relay doctor                                    check each provider's requirements on this machine
-  relay status [--url http://127.0.0.1:8765]      show registrations, pairs, connections, waiting sends
-  relay clear  [--url http://127.0.0.1:8765]      remove all registrations and pairs`;
+  relay status [--url http://127.0.0.1:8765]      show registrations, bindings, connections, waiting sends
+  relay clear  [--url http://127.0.0.1:8765]      remove all registrations and bindings`;
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
