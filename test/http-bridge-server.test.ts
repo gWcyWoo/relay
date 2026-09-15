@@ -42,17 +42,40 @@ async function connect(bridge: BridgeHttpServer, provider: string, name = provid
   return client;
 }
 
+/** Queues every channel message pushed to this client; `next()` hands them out in arrival order. */
+function channelMessages(client: Client): { next(what?: string): Promise<Received> } {
+  const queue: Received[] = [];
+  const waiters: Array<(r: Received) => void> = [];
+  client.setNotificationHandler(ChannelNotificationSchema, (n) => {
+    const received = {
+      content: n.params.content,
+      from: n.params.meta.from as string,
+      provider: n.params.meta.provider as string,
+      role: n.params.meta.role as string,
+    };
+    const waiter = waiters.shift();
+    if (waiter) waiter(received);
+    else queue.push(received);
+  });
+  return {
+    next(what = "channel message") {
+      const queued = queue.shift();
+      if (queued) return Promise.resolve(queued);
+      return within(new Promise<Received>((resolve) => waiters.push(resolve)), 1000, what);
+    },
+  };
+}
+
 /** Resolves with the next channel message pushed to this client. */
 function nextChannelMessage(client: Client): Promise<Received> {
-  return new Promise((resolve) => {
-    client.setNotificationHandler(ChannelNotificationSchema, (n) => {
-      resolve({
-        content: n.params.content,
-        from: n.params.meta.from as string,
-        provider: n.params.meta.provider as string,
-        role: n.params.meta.role as string,
-      });
-    });
+  return channelMessages(client).next();
+}
+
+/** Resolves with `promise`, or rejects after `ms` so a missing push fails the test instead of hanging it. */
+function within<T>(promise: Promise<T>, ms = 1000, what = "promise"): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms} ms`)), ms);
+    promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
   });
 }
 
@@ -67,11 +90,13 @@ interface Registered {
   role: string;
   token: string;
   bound: Array<{ sessionId: string; provider: string; role: string; address?: string }>;
+  notified?: boolean;
+  notifyError?: string;
   setupProblems?: Array<{ name: string; ok: boolean | null; fix: string }>;
 }
 
 /** Register and return the parsed result; throws on a tool error so tests fail at the cause. */
-async function register(client: Client, sessionId: string, role = "", token?: string): Promise<Registered> {
+async function register(client: Client, sessionId: string, role: string, token?: string): Promise<Registered> {
   const result = await client.callTool({
     name: "register",
     arguments: { sessionId, role, ...(token === undefined ? {} : { token }) },
@@ -88,22 +113,23 @@ test("a session registers, hands its token to a counterpart, and the two exchang
   const bridge = await startBridge();
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
-  const pushed = nextChannelMessage(claude);
+  const pushes = channelMessages(claude);
 
   try {
     const cl = await register(claude, "cl-1", "review");
     assert.match(cl.token, /^[A-Za-z0-9_-]{8}@127\.0\.0\.1:\d+$/);
     assert.deepEqual(cl.bound, []);
 
-    const cx = await register(codex, "cx-1", "", cl.token);
+    const cx = await register(codex, "cx-1", "executor", cl.token);
     assert.notEqual(cx.token, cl.token);
     assert.deepEqual(cx.bound, [{ sessionId: "cl-1", provider: "claude", role: "review" }]);
+    assert.match((await pushes.next("bind notice")).content, /^\[Relay\] executor \(codex, cx-1\) bound to you/);
 
     const sendPromise = codex.callTool({
       name: "send",
       arguments: { message: "What is 2+2?", selfSessionId: "cx-1", target: "claude", role: "review" },
     });
-    assert.deepEqual(await pushed, { content: "What is 2+2?", from: "cx-1", provider: "codex", role: "" });
+    assert.deepEqual(await pushes.next(), { content: "What is 2+2?", from: "cx-1", provider: "codex", role: "executor" });
 
     const reply = await claude.callTool({
       name: "send",
@@ -147,6 +173,87 @@ test("registering again keeps the token; another token appends a binding", async
   }
 });
 
+test("a role is unique per relay: a second session asking for a taken role is refused and not registered", async () => {
+  const bridge = await startBridge();
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  try {
+    const cl = await register(claude, "cl-1", "review");
+
+    const taken = await codex.callTool({ name: "register", arguments: { sessionId: "cx-1", role: "review" } });
+    assert.equal(taken.isError, true);
+    assert.equal(textOf(taken), 'Role "review" is taken by session cl-1; register with another role');
+
+    const state = await stateOf(bridge);
+    assert.deepEqual(state.registrations.map((r: { sessionId: string }) => r.sessionId), ["cl-1"]);
+    assert.equal(state.registrations[0].token, cl.token);
+
+    // The same session may re-register its own role.
+    const again = await register(claude, "cl-1", "review");
+    assert.equal(again.token, cl.token);
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
+test("register needs a role: an empty role is refused and nothing is registered", async () => {
+  const bridge = await startBridge();
+  const claude = await connect(bridge, "claude");
+  try {
+    const empty = await claude.callTool({ name: "register", arguments: { sessionId: "cl-1", role: "" } });
+    assert.equal(empty.isError, true);
+    assert.match(textOf(empty), /role/);
+    assert.deepEqual((await stateOf(bridge)).registrations, []);
+  } finally {
+    await Promise.allSettled([claude.close()]);
+    await bridge.close();
+  }
+});
+
+test("binding with a token tells the token's owner who bound to it", async () => {
+  const bridge = await startBridge();
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  const pushed = nextChannelMessage(claude);
+  try {
+    const cl = await register(claude, "cl-1", "review");
+    const cx = await register(codex, "cx-1", "executor", cl.token);
+    assert.equal(cx.notified, true);
+    assert.equal(cx.notifyError, undefined);
+    assert.deepEqual(await within(pushed, 1000, "bind notice to claude"), {
+      content: '[Relay] executor (codex, cx-1) bound to you with your token; reach it with send(role="executor").',
+      from: "cx-1",
+      provider: "codex",
+      role: "executor",
+    });
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
+test("when the token's owner cannot be told, the binding still holds and the binder sees why", async () => {
+  const bridge = await startBridge();
+  const gemini = await connect(bridge, "gemini");
+  const claude = await connect(bridge, "claude");
+  try {
+    const gm = await register(gemini, "gm-1", "review");
+    const cl = await register(claude, "cl-1", "executor", gm.token);
+    assert.deepEqual(cl.bound, [{ sessionId: "gm-1", provider: "gemini", role: "review" }]);
+    assert.equal(cl.notified, false);
+    assert.match(cl.notifyError ?? "", /gemini sessions cannot receive pushes/);
+
+    const state = await stateOf(bridge);
+    const of = (id: string) => state.bindings.find((x: { sessionId: string }) => x.sessionId === id)?.counterparts.map((c: { sessionId: string }) => c.sessionId);
+    assert.deepEqual(of("cl-1"), ["gm-1"]);
+    assert.deepEqual(of("gm-1"), ["cl-1"]);
+  } finally {
+    await Promise.allSettled([gemini.close(), claude.close()]);
+    await bridge.close();
+  }
+});
+
 test("bad tokens fail visibly at register", async () => {
   const bridge = await startBridge();
   const claude = await connect(bridge, "claude");
@@ -169,16 +276,39 @@ test("bad tokens fail visibly at register", async () => {
   }
 });
 
+test("send reaches a counterpart by role alone; target is not needed", async () => {
+  const bridge = await startBridge();
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  const pushes = channelMessages(claude);
+  try {
+    const cl = await register(claude, "cl-1", "review");
+    await register(codex, "cx-1", "executor", cl.token);
+    await pushes.next("bind notice");
+
+    const pending = codex.callTool({ name: "send", arguments: { message: "ready?", selfSessionId: "cx-1", role: "review" } });
+    assert.deepEqual(await pushes.next("push to claude"), { content: "ready?", from: "cx-1", provider: "codex", role: "executor" });
+
+    const reply = await claude.callTool({ name: "send", arguments: { message: "go", selfSessionId: "cl-1", role: "executor" } });
+    assert.deepEqual(JSON.parse(textOf(reply)), { sent: true });
+    assert.equal(textOf(await pending), "go");
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
 test("codex send waits for the reply while claude send returns at once", async () => {
   const bridge = await startBridge();
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
-  const pushed = nextChannelMessage(claude);
+  const pushes = channelMessages(claude);
   try {
     const cl = await register(claude, "cl-1", "review");
-    await register(codex, "cx-1", "", cl.token);
+    await register(codex, "cx-1", "executor", cl.token);
+    await pushes.next("bind notice");
     const pending = codex.callTool({ name: "send", arguments: { message: "q", selfSessionId: "cx-1", target: "claude" } });
-    await pushed;
+    assert.equal((await pushes.next()).content, "q");
     assert.deepEqual((await stateOf(bridge)).waiting, ["cx-1"]);
 
     const reply = await claude.callTool({ name: "send", arguments: { message: "a", selfSessionId: "cl-1", target: "codex" } });
@@ -208,10 +338,18 @@ test("send without a binding fails visibly", async () => {
   const bridge = await startBridge();
   const codex = await connect(bridge, "codex");
   try {
-    await register(codex, "cx-1");
+    await register(codex, "cx-1", "executor");
     const result = await codex.callTool({ name: "send", arguments: { message: "hi", selfSessionId: "cx-1", target: "claude", role: "review" } });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /No bound claude session with role "review"; register with its token first/);
+
+    const byRole = await codex.callTool({ name: "send", arguments: { message: "hi", selfSessionId: "cx-1", role: "review" } });
+    assert.equal(byRole.isError, true);
+    assert.match(textOf(byRole), /No bound session with role "review"; register with its token first/);
+
+    const neither = await codex.callTool({ name: "send", arguments: { message: "hi", selfSessionId: "cx-1" } });
+    assert.equal(neither.isError, true);
+    assert.match(textOf(neither), /target or role is required/);
   } finally {
     await Promise.allSettled([codex.close()]);
     await bridge.close();
@@ -225,7 +363,7 @@ test("a session that drops without DELETE keeps its registration and bindings; r
   let claude2: Client | undefined;
   try {
     const cl = await register(claude1, "cl-1", "review");
-    await register(codex, "cx-1", "", cl.token);
+    await register(codex, "cx-1", "executor", cl.token);
     const first = nextChannelMessage(claude1);
     const pending1 = codex.callTool({ name: "send", arguments: { message: "one", selfSessionId: "cx-1", target: "claude" } });
     await first;
@@ -255,12 +393,13 @@ test("unregister drops the binding and fails the waiting counterpart", async () 
   const bridge = await startBridge();
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
-  const pushed = nextChannelMessage(claude);
+  const pushes = channelMessages(claude);
   try {
     const cl = await register(claude, "cl-1", "review");
-    await register(codex, "cx-1", "", cl.token);
+    await register(codex, "cx-1", "executor", cl.token);
+    await pushes.next("bind notice");
     const pending = codex.callTool({ name: "send", arguments: { message: "one", selfSessionId: "cx-1", target: "claude" } });
-    await pushed;
+    assert.equal((await pushes.next()).content, "one");
 
     const left = await claude.callTool({ name: "unregister", arguments: { sessionId: "cl-1" } });
     assert.deepEqual(JSON.parse(textOf(left)), { unregistered: true, sessionId: "cl-1" });
@@ -281,13 +420,14 @@ test("admin endpoints expose and clear the relay state", async () => {
   const bridge = await startBridge();
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
-  const pushed = nextChannelMessage(claude);
+  const pushes = channelMessages(claude);
   const admin = new URL("/admin/state", bridge.url);
   try {
     const cl = await register(claude, "cl-1", "review");
-    await register(codex, "cx-1", "", cl.token);
+    await register(codex, "cx-1", "executor", cl.token);
+    await pushes.next("bind notice");
     const pending = codex.callTool({ name: "send", arguments: { message: "one", selfSessionId: "cx-1", target: "claude" } });
-    await pushed;
+    assert.equal((await pushes.next()).content, "one");
 
     const state = await (await fetch(admin)).json();
     assert.equal(state.server.url, bridge.url.toString());
@@ -338,7 +478,7 @@ test("when a registered transport closes, the one fresh unregistered transport i
   let replacement: Client | undefined;
   try {
     const cl = await register(throwaway, "cl-1", "review");
-    await register(codex, "cx-1", "", cl.token);
+    await register(codex, "cx-1", "executor", cl.token);
 
     replacement = await connect(bridge, "claude", "replacement");
     const pushed = nextChannelMessage(replacement);
@@ -368,7 +508,7 @@ test("a message to an idle codex session is delivered through the codex:// deep 
   const codex = await connect(bridge, "codex");
   try {
     const cl = await register(claude, "cl-1", "architect");
-    await register(codex, "thread-42", "", cl.token);
+    await register(codex, "thread-42", "executor", cl.token);
     const result = await claude.callTool({
       name: "send",
       arguments: { message: "please implement the login page", selfSessionId: "cl-1", target: "codex" },
@@ -406,7 +546,7 @@ test("the submit keys follow Codex's Enter setting, whether a turn is running, i
   const codex = await connect(bridge, "codex");
   try {
     const cl = await register(claude, "cl-1", "architect");
-    await register(codex, "thread-42", "", cl.token);
+    await register(codex, "thread-42", "executor", cl.token);
     const send = async (urgent: boolean) => {
       const r = await claude.callTool({ name: "send", arguments: { message: "stop, wrong file", selfSessionId: "cl-1", target: "codex", urgent } });
       assert.equal(r.isError, undefined);
@@ -457,7 +597,7 @@ test("when the desktop cannot submit, send fails visibly but says the message is
   const codex = await connect(bridge, "codex");
   try {
     const cl = await register(claude, "cl-1", "architect");
-    await register(codex, "thread-42", "", cl.token);
+    await register(codex, "thread-42", "executor", cl.token);
     const result = await claude.callTool({ name: "send", arguments: { message: "task", selfSessionId: "cl-1", target: "codex" } });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /in the Codex composer for thread thread-42 but was not submitted: osascript is not allowed/);
@@ -473,9 +613,9 @@ test("register reports only failing setup checks, with fixes", async () => {
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   try {
-    const cl = await register(claude, "cl-1");
+    const cl = await register(claude, "cl-1", "review");
     assert.equal("setupProblems" in cl, false);
-    const cx = await register(codex, "t-1");
+    const cx = await register(codex, "t-1", "executor");
     assert.equal(cx.setupProblems?.length, 1);
     assert.equal(cx.setupProblems?.[0].name, "Accessibility permission for the app that launched Relay");
     assert.equal(cx.setupProblems?.[0].ok, false);
@@ -511,14 +651,13 @@ test("a reply that comes after codex ended the turn that called send goes throug
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   try {
-    const pushed = new Promise<string>((resolve) => {
-      claude.setNotificationHandler(ChannelNotificationSchema, (n) => resolve(n.params.content));
-    });
+    const pushes = channelMessages(claude);
     const cl = await register(claude, "cl-1", "architect");
-    await register(codex, "thread-42", "", cl.token);
+    await register(codex, "thread-42", "executor", cl.token);
+    await pushes.next("bind notice");
 
     const blocked = codex.callTool({ name: "send", arguments: { message: "how should retry work?", selfSessionId: "thread-42", target: "claude" } });
-    assert.equal(await pushed, "how should retry work?");
+    assert.equal((await pushes.next()).content, "how should retry work?");
 
     turnEnded = true;
     const reply = await claude.callTool({ name: "send", arguments: { message: "bound retries to the new candidate", selfSessionId: "cl-1", target: "codex" } });
@@ -538,11 +677,12 @@ test("a codex send gives up waiting at the relay's limit, before the codex clien
   const claude = await connect(bridge, "claude");
   const codex = await connect(bridge, "codex");
   try {
-    const pushed = nextChannelMessage(claude);
+    const pushes = channelMessages(claude);
     const cl = await register(claude, "cl-1", "architect");
-    await register(codex, "thread-42", "", cl.token);
+    await register(codex, "thread-42", "executor", cl.token);
+    await pushes.next("bind notice");
     const result = await codex.callTool({ name: "send", arguments: { message: "committed 7963322", selfSessionId: "thread-42", target: "claude" } });
-    assert.equal((await pushed).content, "committed 7963322");
+    assert.equal((await pushes.next()).content, "committed 7963322");
     assert.equal(result.isError, undefined);
     assert.match(textOf(result), /^\[Relay\] No reply within 0 seconds/);
     assert.deepEqual((await stateOf(bridge)).waiting, []);
@@ -570,17 +710,25 @@ test("a session binds to a session on another relay with its token; messages flo
   });
   const claude = await connect(relayA, "claude");
   const codex = await connect(relayB, "codex");
+  const pushes = channelMessages(claude);
   try {
     const cl = await register(claude, "cl-1", "architect");
     const cx = await register(codex, "cx-1", "executor", cl.token);
     assert.deepEqual(cx.bound, [{ sessionId: "cl-1", provider: "claude", role: "architect", address: `http://127.0.0.1:${relayA.url.port}` }]);
+    // The owner on relay A is told about the binding made from relay B.
+    assert.equal(cx.notified, true);
+    assert.deepEqual(await pushes.next("bind notice across relays"), {
+      content: '[Relay] executor (codex, cx-1) bound to you with your token; reach it with send(role="executor").',
+      from: "cx-1",
+      provider: "codex",
+      role: "executor",
+    });
     const onA = (await stateOf(relayA)).bindings.find((b: { sessionId: string }) => b.sessionId === "cl-1");
     assert.deepEqual(onA.counterparts, [{ sessionId: "cx-1", provider: "codex", role: "executor", address: `http://127.0.0.1:${relayB.url.port}` }]);
 
     // Codex asks; Claude on the other relay gets the push and its answer returns from Codex's send.
-    const pushed = nextChannelMessage(claude);
     const pending = codex.callTool({ name: "send", arguments: { message: "which retry policy?", selfSessionId: "cx-1", target: "claude", role: "architect" } });
-    assert.deepEqual(await pushed, { content: "which retry policy?", from: "cx-1", provider: "codex", role: "executor" });
+    assert.deepEqual(await pushes.next(), { content: "which retry policy?", from: "cx-1", provider: "codex", role: "executor" });
     assert.deepEqual((await stateOf(relayB)).waiting, ["cx-1"]);
     const reply = await claude.callTool({ name: "send", arguments: { message: "exponential, max 3", selfSessionId: "cl-1", target: "codex", role: "executor" } });
     assert.equal(reply.isError, undefined);
@@ -594,6 +742,28 @@ test("a session binds to a session on another relay with its token; messages flo
     assert.deepEqual(submits, [keys(false)]);
   } finally {
     await Promise.allSettled([claude.close(), codex.close()]);
+    await Promise.allSettled([relayA.close(), relayB.close()]);
+  }
+});
+
+test("a remote binder whose role is already taken on the owner's relay is refused; nothing is bound on either side", async () => {
+  const relayA = await startBridge();
+  const relayB = await startBridge();
+  const claude = await connect(relayA, "claude");
+  const local = await connect(relayA, "codex", "codex-local");
+  const remote = await connect(relayB, "codex", "codex-remote");
+  try {
+    const cl = await register(claude, "cl-1", "architect");
+    await register(local, "cx-local", "executor");
+
+    const refused = await remote.callTool({ name: "register", arguments: { sessionId: "cx-remote", role: "executor", token: cl.token } });
+    assert.equal(refused.isError, true);
+    assert.match(textOf(refused), /Role "executor" is taken by session cx-local on relay 127\.0\.0\.1:\d+; register with another role/);
+
+    assert.deepEqual((await stateOf(relayA)).bindings, []);
+    assert.deepEqual((await stateOf(relayB)).bindings, []);
+  } finally {
+    await Promise.allSettled([claude.close(), local.close(), remote.close()]);
     await Promise.allSettled([relayA.close(), relayB.close()]);
   }
 });

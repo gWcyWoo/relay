@@ -112,9 +112,12 @@ export interface PeeringOptions {
   ownHosts(): Set<string>;
 }
 
+/** Whether the token's owner was told about a new binding; the binding holds either way. */
+export type BindNotice = { notified: true } | { notified: false; error: string };
+
 export interface Peering {
-  /** Bind a local session to the session a token points at, here or on another relay. */
-  bind(session: Registration, token: string): Promise<void>;
+  /** Bind a local session to the session a token points at, here or on another relay, and tell the owner. */
+  bind(session: Registration, token: string): Promise<BindNotice>;
   /** Remove a local session and tell every peer relay it was bound to. */
   unregister(sessionId: string): Promise<void>;
   handleBind(request: PeerBindRequest, callerHost: string): Promise<PeerResponse>;
@@ -171,13 +174,26 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
     return relay.bindingsOf(sessionId).some((b) => b.sessionId === counterpart);
   }
 
+  /** Tell a token's owner that `binder` bound to it. A failed push does not undo the binding. */
+  async function notifyOwner(owner: string, binder: { sessionId: string; provider: string; role: string }): Promise<BindNotice> {
+    const message =
+      `[Relay] ${binder.role} (${binder.provider}, ${binder.sessionId}) bound to you with your token; ` +
+      `reach it with send(role="${binder.role}").`;
+    try {
+      await relay.deliver(owner, message, { sessionId: binder.sessionId, provider: binder.provider, role: binder.role }, { urgent: false });
+      return { notified: true };
+    } catch (error) {
+      return { notified: false, error: describe(error) };
+    }
+  }
+
   return {
     async bind(session, token) {
       const parsed = parseToken(token);
       if (ownHosts().has(parsed.host) && parsed.port === self().port) {
         const target = requireByToken(token);
         relay.bind(session.sessionId, { sessionId: target.sessionId, provider: target.provider, role: target.role, token });
-        return;
+        return notifyOwner(target.sessionId, session);
       }
       const address = `http://${parsed.host}:${parsed.port}`;
       const request: PeerBindRequest = {
@@ -185,12 +201,14 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
         session: { sessionId: session.sessionId, provider: session.provider, role: session.role, token: session.token },
         port: self().port,
       };
-      const { session: target } = (await postPeer(address, "/peer/bind", request)) as {
+      const { session: target, notice } = (await postPeer(address, "/peer/bind", request)) as {
         session: { sessionId: string; provider: string; role: string };
+        notice: BindNotice;
       };
       const binding: Binding = { ...target, token, address };
       relay.bind(session.sessionId, binding);
       relay.connect(target.sessionId, remoteConnection(address, token, target.sessionId, target.provider));
+      return notice;
     },
 
     async unregister(sessionId) {
@@ -213,6 +231,14 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
       if (target.sessionId === request.session.sessionId) {
         return { status: 400, body: { error: `Session ${target.sessionId} cannot bind to itself` } };
       }
+      const holder = relay.findByRole(request.session.role);
+      if (holder && holder.sessionId !== request.session.sessionId) {
+        const me = self();
+        return {
+          status: 409,
+          body: { error: `Role "${request.session.role}" is taken by session ${holder.sessionId} on relay ${me.host}:${me.port}; register with another role` },
+        };
+      }
       const address = `http://${callerHost}:${request.port}`;
       try {
         const ping = await fetch(new URL("/peer/ping", address));
@@ -231,7 +257,8 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
       const { session } = request;
       relay.bind(target.sessionId, { sessionId: session.sessionId, provider: session.provider, role: session.role, token: session.token, address });
       relay.connect(session.sessionId, remoteConnection(address, session.token, session.sessionId, session.provider));
-      return { status: 200, body: { session: { sessionId: target.sessionId, provider: target.provider, role: target.role } } };
+      const notice = await notifyOwner(target.sessionId, session);
+      return { status: 200, body: { session: { sessionId: target.sessionId, provider: target.provider, role: target.role }, notice } };
     },
 
     async handleDeliver(request) {

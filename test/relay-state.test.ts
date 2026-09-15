@@ -132,13 +132,18 @@ describe("relay state: send", () => {
       relay.send({ message: "x", selfSessionId: "cx", target: "gemini" }),
       /No bound gemini session; register with its token first/,
     );
-    await assert.rejects(relay.send({ message: "x", selfSessionId: "cx", target: "" }), /target is required/);
+    await assert.rejects(relay.send({ message: "x", selfSessionId: "cx", target: "" }), /target or role is required/);
 
-    relay.register({ sessionId: "cl2", provider: "claude", role: "review" });
-    relay.bind("cx", { sessionId: "cl2", provider: "claude", role: "review", token: "t3@127.0.0.1:8765" });
+    // Roles are unique per relay, so ambiguity is only possible by provider alone.
+    assert.throws(
+      () => relay.register({ sessionId: "cl2", provider: "claude", role: "review" }),
+      /Role "review" is taken by session cl; register with another role/,
+    );
+    relay.register({ sessionId: "cl2", provider: "claude", role: "review2" });
+    relay.bind("cx", { sessionId: "cl2", provider: "claude", role: "review2", token: "t3@127.0.0.1:8765" });
     await assert.rejects(
-      relay.send({ message: "x", selfSessionId: "cx", target: "claude", role: "review" }),
-      /Several bound claude sessions with role "review": cl, cl2; pass one sessionId as target/,
+      relay.send({ message: "x", selfSessionId: "cx", target: "claude" }),
+      /Several bound claude sessions: cl, cl2; pass one sessionId as target/,
     );
     const second = pushConnection();
     relay.connect("cl2", second.connection);

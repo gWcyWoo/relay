@@ -77,9 +77,9 @@ export function waitLimitNote(waitLimitMs: number): string {
 export interface SendOptions {
   message: string;
   selfSessionId: string;
-  /** Counterpart provider, e.g. "claude", matched among the sender's bindings; a bound sessionId is also accepted. */
-  target: string;
-  /** Counterpart role, e.g. "review"; empty matches any role. */
+  /** Counterpart provider, e.g. "claude", matched among the sender's bindings; a bound sessionId is also accepted. Empty: any provider. */
+  target?: string;
+  /** Counterpart role, e.g. "review"; roles are unique per relay, so this alone names a counterpart. Empty matches any role. */
   role?: string;
   /** Interrupt the counterpart's current work with this message instead of queueing behind it. */
   urgent?: boolean;
@@ -108,6 +108,8 @@ export interface RelayState {
   /** Register a local session; the token is minted once and kept on later calls. */
   register(session: { sessionId: string; provider: string; role: string }): Registration;
   findByToken(token: string): Registration | undefined;
+  /** The local session registered under `role`, if any; roles are unique per relay. */
+  findByRole(role: string): Registration | undefined;
   /** Let `sessionId` reach `counterpart`; both ways when the counterpart is registered here. */
   bind(sessionId: string, counterpart: Binding): void;
   bindingsOf(sessionId: string): Binding[];
@@ -193,17 +195,22 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
     }
   }
 
+  function findByRole(role: string): Registration | undefined {
+    return [...registrations.values()].find((r) => r.role === role);
+  }
+
   function resolveTarget(self: Registration, target: string, role: string): string {
     const mine = bindingsMap(self.sessionId);
     if (mine.has(target)) return target;
     const candidates = [...mine.values()].filter(
-      (b) => b.provider === target && (role === "" || b.role === role),
+      (b) => (target === "" || b.provider === target) && (role === "" || b.role === role),
     );
+    const what = `${target || ""} session`.trim();
     const withRole = role ? ` with role "${role}"` : "";
-    if (candidates.length === 0) throw new Error(`No bound ${target} session${withRole}; register with its token first`);
+    if (candidates.length === 0) throw new Error(`No bound ${what}${withRole}; register with its token first`);
     if (candidates.length > 1) {
       throw new Error(
-        `Several bound ${target} sessions${withRole}: ${candidates.map((c) => c.sessionId).join(", ")}; pass one sessionId as target`,
+        `Several bound ${what}s${withRole}: ${candidates.map((c) => c.sessionId).join(", ")}; pass one sessionId as target`,
       );
     }
     return candidates[0].sessionId;
@@ -233,6 +240,10 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
 
   return {
     register({ sessionId, provider, role }) {
+      const holder = findByRole(role);
+      if (holder && holder.sessionId !== sessionId) {
+        throw new Error(`Role "${role}" is taken by session ${holder.sessionId}; register with another role`);
+      }
       const existing = registrations.get(sessionId);
       const registration = { sessionId, provider, role, token: existing?.token ?? mintToken() };
       registrations.set(sessionId, registration);
@@ -242,6 +253,8 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
     findByToken(token) {
       return [...registrations.values()].find((r) => r.token === token);
     },
+
+    findByRole,
 
     bind(sessionId, counterpart) {
       const self = requireRegistration(sessionId);
@@ -311,9 +324,9 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
       connections.clear();
     },
 
-    async send({ message, selfSessionId, target, role = "", urgent = false }) {
+    async send({ message, selfSessionId, target = "", role = "", urgent = false }) {
       const self = requireRegistration(selfSessionId);
-      if (!target) throw new Error("target is required: the counterpart's provider or sessionId");
+      if (!target && !role) throw new Error("target or role is required: the counterpart's role, provider or sessionId");
       const own = connections.get(selfSessionId);
       if (!own) throw new Error(`Sender session has no live connection: ${selfSessionId}`);
       const other = resolveTarget(self, target, role);

@@ -15,9 +15,9 @@
 ```text
 Claude   register("cl-1", "architect")                      → token k8f3ab2c@192.168.0.107:8765
 Codex    register("thread-42", "executor", "k8f3ab2c@…")     → 与 cl-1 绑定
-Codex    send("第二批完成,请复审", "thread-42", "claude", "architect")
+Codex    send("第二批完成,请复审", "thread-42", role="architect")
            …阻塞,直到架构师回复…
-Claude   send("通过。提交到本地 main,不推送。", "cl-1", "codex", "executor")
+Claude   send("通过。提交到本地 main,不推送。", "cl-1", role="executor")
            → 作为 Codex 那次 send 的返回值送达
 Claude   send("停:改错文件了", "cl-1", "codex", "executor", urgent=true)
            → 插入 Codex 正在运行的回合,而不是排在后面
@@ -26,8 +26,8 @@ Claude   send("停:改错文件了", "cl-1", "codex", "executor", urgent=true)
 三个 MCP 工具,所有 provider 完全一样:
 
 ```text
-register(sessionId, role, token?)   → { token, bound: [...] }
-send(message, selfSessionId, target, role?, urgent?)
+register(sessionId, role, token?)   → { token, bound: [...], notified? }
+send(message, selfSessionId, role?, target?, urgent?)
 unregister(sessionId)
 ```
 
@@ -59,7 +59,7 @@ claude --dangerously-load-development-channels server:relay
 
 ### 会话怎么找到彼此
 
-会话注册后拿到一个 **token**(`secret@host:port`):它就是这个会话的地址,注册期间一直有效,断线重连也不变。把它交给另一个会话,让那个会话带着它 `register`,两者就**绑定**了,双方表里都有对方。每多一个 token 就多一条绑定,所以一个架构师可以同时绑本机的 Codex 和另外两台机器上的 Codex。token 不出现在 `send` 里:发消息按 provider 和 role 找绑定的对方,两个对方 role 相同时用 sessionId 指定。
+会话注册后拿到一个 **token**(`secret@host:port`):它就是这个会话的地址,注册期间一直有效,断线重连也不变。把它交给另一个会话,让那个会话带着它 `register`,两者就**绑定**了,双方表里都有对方。每多一个 token 就多一条绑定,所以一个架构师可以同时绑本机的 Codex 和另外两台机器上的 Codex。绑定成功后,token 的所有者会收到一条 Relay 消息,告诉它谁绑了上来。role 在一台 Relay 上唯一,重名的注册会被拒绝;所以 token 不出现在 `send` 里,发消息只按 role 找绑定的对方,provider 或 sessionId 只在不知道 role 时才需要。
 
 token 指向另一台机器时,两台 Relay 之间通过 HTTP 绑定,并且先互相回连确认;任何一侧有防火墙,`register` 直接失败并写明连不上的地址。跨机器的消息带着目标会话的 token 转发,没有 token 一律拒绝。
 
@@ -113,9 +113,9 @@ Every message is visible in the session that receives it.
 ```text
 Claude   register("cl-1", "architect")                      → token k8f3ab2c@192.168.0.107:8765
 Codex    register("thread-42", "executor", "k8f3ab2c@…")     → bound to cl-1
-Codex    send("Batch 2 done, please review", "thread-42", "claude", "architect")
+Codex    send("Batch 2 done, please review", "thread-42", role="architect")
            …blocks until the architect answers…
-Claude   send("Approved. Commit to main, no push.", "cl-1", "codex", "executor")
+Claude   send("Approved. Commit to main, no push.", "cl-1", role="executor")
            → returns from Codex's send
 Claude   send("Stop: wrong file", "cl-1", "codex", "executor", urgent=true)
            → steers Codex's running turn instead of queueing behind it
@@ -124,8 +124,8 @@ Claude   send("Stop: wrong file", "cl-1", "codex", "executor", urgent=true)
 Three MCP tools, identical for every provider:
 
 ```text
-register(sessionId, role, token?)   → { token, bound: [...] }
-send(message, selfSessionId, target, role?, urgent?)
+register(sessionId, role, token?)   → { token, bound: [...], notified? }
+send(message, selfSessionId, role?, target?, urgent?)
 unregister(sessionId)
 ```
 
@@ -165,8 +165,11 @@ as long as it stays registered and unchanged across reconnects. Hand it to
 another session and let that session `register` with it; the two are now
 **bound**, on both sides. Each further token adds one more binding, so an
 architect can be bound to a local Codex and to two Codex threads on other
-machines at once. Tokens never appear in `send`: bound counterparts are
-addressed by provider and role, or by sessionId when two share a role.
+machines at once. Once bound, the token's owner gets a Relay
+message saying who bound to it. Roles are unique per relay (a taken role is
+refused at `register`), so tokens never appear in `send`: a bound counterpart
+is addressed by role alone; provider or sessionId are only for when the role
+is unknown.
 
 When the token points at another machine, the two Relays bind over HTTP and
 call each other back first; a firewall on either side fails `register` with
