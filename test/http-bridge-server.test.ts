@@ -350,6 +350,15 @@ test("every provider gets the same tools and any provider name is accepted; only
     assert.match(codex.getInstructions() ?? "", /"yield_time_ms": 240000/);
     assert.match(codex.getInstructions() ?? "", /Never poll it with short waits or sleep loops/);
     assert.doesNotMatch(claude.getInstructions() ?? "", /yield_time_ms/);
+
+    // Every provider is told what makes relayed traffic expensive: acks, long reports, repeating what it sent.
+    for (const client of [claude, gemini, codex]) {
+      const text = client.getInstructions() ?? "";
+      assert.match(text, /never ask a counterpart to acknowledge/);
+      assert.match(text, /about 20 lines at most/);
+      assert.match(text, /do not repeat it/);
+      assert.doesNotMatch(text, /show the full text you sent/);
+    }
   } finally {
     await Promise.allSettled([claude.close(), gemini.close(), codex.close()]);
     await bridge.close();
@@ -542,7 +551,7 @@ test("a message to an idle codex session is delivered through the codex:// deep 
     assert.equal(url.host, "threads");
     assert.equal(url.pathname, "/thread-42");
     const prompt = url.searchParams.get("prompt") ?? "";
-    assert.match(prompt, /^\[Relay\] from claude \(role "architect"\)\. Reply with send\(target="claude", role="architect"\)\./);
+    assert.match(prompt, /^\[Relay\] from claude \(role "architect"\)\. Reply with send\(role="architect"\)\./);
     assert.match(prompt, /please implement the login page$/);
     assert.equal(calls[1], "submit ChatGPT command=false shift=false");
   } finally {

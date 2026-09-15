@@ -278,7 +278,7 @@ const codex: ProviderStrategy = {
       const invert = running && (urgent ? mode === "queue" : mode !== "queue");
       const keys: SubmitKeys = enter === "enter" ? { command: invert, shift: false } : { command: true, shift: invert };
       const who = from.role ? ` (role "${from.role}")` : "";
-      const reply = from.role ? `send(target="${from.provider}", role="${from.role}")` : `send(target="${from.provider}")`;
+      const reply = from.role ? `send(role="${from.role}")` : `send(target="${from.sessionId}")`;
       const header = `[Relay] from ${from.provider}${who}. Reply with ${reply}.`;
       const url = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(`${header}\n\n${message}`)}`;
       await desktop.open(url);
