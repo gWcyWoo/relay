@@ -335,16 +335,23 @@ test("codex send waits for the reply while claude send returns at once", async (
   }
 });
 
-test("every provider gets the same tools and any provider name is accepted", async () => {
+test("every provider gets the same tools and any provider name is accepted; only codex is told how to wait cheaply", async () => {
   const bridge = await startBridge();
   const claude = await connect(bridge, "claude");
   const gemini = await connect(bridge, "gemini");
+  const codex = await connect(bridge, "codex");
   try {
     const expected = ["register", "send", "unregister"];
     assert.deepEqual((await claude.listTools()).tools.map((t) => t.name).sort(), expected);
     assert.deepEqual((await gemini.listTools()).tools.map((t) => t.name).sort(), expected);
+    assert.deepEqual((await codex.listTools()).tools.map((t) => t.name).sort(), expected);
+
+    // Codex polls a yielded exec cell with full-context model calls, so its instructions pin a long yield.
+    assert.match(codex.getInstructions() ?? "", /"yield_time_ms": 240000/);
+    assert.match(codex.getInstructions() ?? "", /Never poll it with short waits or sleep loops/);
+    assert.doesNotMatch(claude.getInstructions() ?? "", /yield_time_ms/);
   } finally {
-    await Promise.allSettled([claude.close(), gemini.close()]);
+    await Promise.allSettled([claude.close(), gemini.close(), codex.close()]);
     await bridge.close();
   }
 });
