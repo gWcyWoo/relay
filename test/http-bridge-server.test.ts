@@ -357,6 +357,7 @@ test("every provider gets the same tools and any provider name is accepted; only
       assert.match(text, /never ask a counterpart to acknowledge/);
       assert.match(text, /about 20 lines at most/);
       assert.match(text, /do not repeat it/);
+      assert.match(text, /for a report, a result or a status update pass wait=false/);
       assert.doesNotMatch(text, /show the full text you sent/);
     }
   } finally {
@@ -696,6 +697,38 @@ test("a reply that comes after codex ended the turn that called send goes throug
     assert.equal(calls.length, 1);
     assert.equal(new URL(calls[0]).pathname, "/thread-42");
     assert.match(textOf(await blocked), /^\[Relay\] The reply arrived after you stopped reading this send/);
+  } finally {
+    await Promise.allSettled([claude.close(), codex.close()]);
+    await bridge.close();
+  }
+});
+
+test("a codex send with wait=false returns once delivered; a later answer arrives through the deep link", async () => {
+  const opens: string[] = [];
+  const bridge = await startBridge({ desktop: { ...idleDesktop, async open(url: string) { opens.push(url); } } });
+  const claude = await connect(bridge, "claude");
+  const codex = await connect(bridge, "codex");
+  try {
+    const pushes = channelMessages(claude);
+    const cl = await register(claude, "cl-1", "architect");
+    await register(codex, "thread-42", "executor", cl.token);
+    await pushes.next("bind notice");
+
+    const result = await within(
+      codex.callTool({ name: "send", arguments: { message: "batch 2 done", selfSessionId: "thread-42", role: "architect", wait: false } }),
+      1000,
+      "send with wait=false",
+    );
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(JSON.parse(textOf(result)), { sent: true });
+    assert.equal((await pushes.next()).content, "batch 2 done");
+    assert.deepEqual((await stateOf(bridge)).waiting, []);
+
+    const reply = await claude.callTool({ name: "send", arguments: { message: "thanks, start batch 3", selfSessionId: "cl-1", role: "executor" } });
+    assert.equal(reply.isError, undefined);
+    assert.equal(opens.length, 1);
+    assert.equal(new URL(opens[0]).pathname, "/thread-42");
+    assert.match(decodeURIComponent(opens[0]), /thanks, start batch 3$/);
   } finally {
     await Promise.allSettled([claude.close(), codex.close()]);
     await bridge.close();

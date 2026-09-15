@@ -83,6 +83,8 @@ export interface SendOptions {
   role?: string;
   /** Interrupt the counterpart's current work with this message instead of queueing behind it. */
   urgent?: boolean;
+  /** For providers whose send blocks for the reply: false returns once delivered; a reply then arrives as a push. Default true. */
+  wait?: boolean;
 }
 
 export interface RelaySnapshot {
@@ -319,7 +321,7 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
       connections.clear();
     },
 
-    async send({ message, selfSessionId, target = "", role = "", urgent = false }) {
+    async send({ message, selfSessionId, target = "", role = "", urgent = false, wait = true }) {
       const self = requireRegistration(selfSessionId);
       if (!target && !role) throw new Error("target or role is required: the counterpart's role, provider or sessionId");
       const own = connections.get(selfSessionId);
@@ -328,7 +330,7 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
 
       // Register our own wait before delivering, so a counterpart that answers
       // immediately finds us waiting instead of trying to push.
-      const reply: Promise<string> = own.waitsForReply ? startWaiting(selfSessionId) : Promise.resolve("");
+      const reply: Promise<string> = own.waitsForReply && wait ? startWaiting(selfSessionId) : Promise.resolve("");
 
       try {
         await deliverTo(other, message, { sessionId: selfSessionId, provider: self.provider, role: self.role }, { urgent });

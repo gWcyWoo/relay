@@ -27,7 +27,7 @@ Claude   send("停:改错文件了", "cl-1", "codex", "executor", urgent=true)
 
 ```text
 register(sessionId, role, token?)   → { token, bound: [...], notified? }
-send(message, selfSessionId, role?, target?, urgent?)
+send(message, selfSessionId, role?, target?, urgent?, wait?)
 unregister(sessionId)
 ```
 
@@ -59,7 +59,7 @@ claude --dangerously-load-development-channels server:relay
 
 ### 会话怎么找到彼此
 
-会话注册后拿到一个 **token**(`secret@host:port`):它就是这个会话的地址,注册期间一直有效,断线重连也不变。把它交给另一个会话,让那个会话带着它 `register`,两者就**绑定**了,双方表里都有对方。每多一个 token 就多一条绑定,所以一个架构师可以同时绑本机的 Codex 和另外两台机器上的 Codex。绑定成功后,token 的所有者会收到一条 Relay 消息,告诉它谁绑了上来。同一个会话的对端之间 role 不能重名,重名的绑定会被拒绝(不同团队各有自己的"执行者 1"没有问题);所以 token 不出现在 `send` 里,发消息只按 role 找绑定的对方,provider 或 sessionId 只在不知道 role 时才需要。
+会话注册后拿到一个 **token**(`secret@host:port`):它就是这个会话的地址,注册期间一直有效,断线重连也不变。把它交给另一个会话,让那个会话带着它 `register`,两者就**绑定**了,双方表里都有对方。每多一个 token 就多一条绑定,所以一个架构师可以同时绑本机的 Codex 和另外两台机器上的 Codex。绑定成功后,token 的所有者会收到一条 Relay 消息,告诉它谁绑了上来。同一个会话的对端之间 role 不能重名,重名的绑定会被拒绝(不同团队各有自己的"执行者 1"没有问题);所以 token 不出现在 `send` 里,发消息只按 role 找绑定的对方,provider 或 sessionId 只在不知道 role 时才需要。Codex 的 `send` 默认阻塞到对方回复;汇报、结果、状态更新这类不需要回复的消息传 `wait=false`,投递后立即返回,之后若有回复会作为新一轮送达。
 
 token 指向另一台机器时,两台 Relay 之间通过 HTTP 绑定,并且先互相回连确认;任何一侧有防火墙,`register` 直接失败并写明连不上的地址。跨机器的消息带着目标会话的 token 转发,没有 token 一律拒绝。
 
@@ -125,7 +125,7 @@ Three MCP tools, identical for every provider:
 
 ```text
 register(sessionId, role, token?)   → { token, bound: [...], notified? }
-send(message, selfSessionId, role?, target?, urgent?)
+send(message, selfSessionId, role?, target?, urgent?, wait?)
 unregister(sessionId)
 ```
 
@@ -170,7 +170,9 @@ message saying who bound to it. Roles are unique among one session's counterpart
 binding that repeats a role the owner already has is refused; two teams may
 each have their own "executor"), so tokens never appear in `send`: a bound counterpart
 is addressed by role alone; provider or sessionId are only for when the role
-is unknown.
+is unknown. Codex's `send` blocks for the answer by default; a report,
+result or status update that needs no answer passes `wait=false` and returns
+once delivered, any later answer arriving as a new turn.
 
 When the token points at another machine, the two Relays bind over HTTP and
 call each other back first; a firewall on either side fails `register` with
