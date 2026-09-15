@@ -173,26 +173,41 @@ test("registering again keeps the token; another token appends a binding", async
   }
 });
 
-test("a role is unique per relay: a second session asking for a taken role is refused and not registered", async () => {
+test("a role is unique among one owner's counterparts: a second binder with the same role is refused, other owners are unaffected", async () => {
   const bridge = await startBridge();
-  const claude = await connect(bridge, "claude");
-  const codex = await connect(bridge, "codex");
+  const owner = await connect(bridge, "claude", "owner");
+  const other = await connect(bridge, "claude", "other");
+  const codexA = await connect(bridge, "codex", "codex-a");
+  const codexB = await connect(bridge, "codex", "codex-b");
   try {
-    const cl = await register(claude, "cl-1", "review");
+    const ow = await register(owner, "cl-1", "review");
+    const ot = await register(other, "cl-2", "review");
+    await register(codexA, "cx-a", "executor", ow.token);
 
-    const taken = await codex.callTool({ name: "register", arguments: { sessionId: "cx-1", role: "review" } });
-    assert.equal(taken.isError, true);
-    assert.equal(textOf(taken), 'Role "review" is taken by session cl-1; register with another role');
-
+    // Same role, same owner: refused, and cx-b stays registered but unbound.
+    await register(codexB, "cx-b", "executor");
+    const refused = await codexB.callTool({ name: "register", arguments: { sessionId: "cx-b", role: "executor", token: ow.token } });
+    assert.equal(refused.isError, true);
+    assert.equal(textOf(refused), 'Role "executor" is already bound to cl-1 by session cx-a; register with another role');
     const state = await stateOf(bridge);
-    assert.deepEqual(state.registrations.map((r: { sessionId: string }) => r.sessionId), ["cl-1"]);
-    assert.equal(state.registrations[0].token, cl.token);
+    assert.deepEqual(state.registrations.map((r: { sessionId: string }) => r.sessionId).sort(), ["cl-1", "cl-2", "cx-a", "cx-b"]);
+    const of = (id: string) => state.bindings.find((x: { sessionId: string }) => x.sessionId === id)?.counterparts.map((c: { sessionId: string }) => c.sessionId) ?? [];
+    assert.deepEqual(of("cl-1"), ["cx-a"]);
+    assert.deepEqual(of("cx-b"), []);
 
-    // The same session may re-register its own role.
-    const again = await register(claude, "cl-1", "review");
-    assert.equal(again.token, cl.token);
+    // Same role under a different owner is fine, and the owner side is checked too:
+    // cx-a may not bind to a second owner whose role it already has bound.
+    const elsewhere = await register(codexB, "cx-b", "executor", ot.token);
+    assert.deepEqual(elsewhere.bound, [{ sessionId: "cl-2", provider: "claude", role: "review" }]);
+    const twoReviews = await codexA.callTool({ name: "register", arguments: { sessionId: "cx-a", role: "executor", token: ot.token } });
+    assert.equal(twoReviews.isError, true);
+    assert.equal(textOf(twoReviews), 'Role "review" is already bound to cx-a by session cl-1; register with another role');
+
+    // Re-binding the same pair is idempotent.
+    const again = await register(codexA, "cx-a", "executor", ow.token);
+    assert.deepEqual(again.bound, [{ sessionId: "cl-1", provider: "claude", role: "review" }]);
   } finally {
-    await Promise.allSettled([claude.close(), codex.close()]);
+    await Promise.allSettled([owner.close(), other.close(), codexA.close(), codexB.close()]);
     await bridge.close();
   }
 });
@@ -746,7 +761,7 @@ test("a session binds to a session on another relay with its token; messages flo
   }
 });
 
-test("a remote binder whose role is already taken on the owner's relay is refused; nothing is bound on either side", async () => {
+test("a remote binder with a role the owner already has bound is refused; nothing is bound on either side", async () => {
   const relayA = await startBridge();
   const relayB = await startBridge();
   const claude = await connect(relayA, "claude");
@@ -754,14 +769,29 @@ test("a remote binder whose role is already taken on the owner's relay is refuse
   const remote = await connect(relayB, "codex", "codex-remote");
   try {
     const cl = await register(claude, "cl-1", "architect");
-    await register(local, "cx-local", "executor");
+    await register(local, "cx-local", "executor", cl.token);
 
     const refused = await remote.callTool({ name: "register", arguments: { sessionId: "cx-remote", role: "executor", token: cl.token } });
     assert.equal(refused.isError, true);
-    assert.match(textOf(refused), /Role "executor" is taken by session cx-local on relay 127\.0\.0\.1:\d+; register with another role/);
+    assert.match(textOf(refused), /Role "executor" is already bound to cl-1 by session cx-local; register with another role/);
 
-    assert.deepEqual((await stateOf(relayA)).bindings, []);
+    const onA = (await stateOf(relayA)).bindings.find((b: { sessionId: string }) => b.sessionId === "cl-1");
+    assert.deepEqual(onA.counterparts.map((c: { sessionId: string }) => c.sessionId), ["cx-local"]);
     assert.deepEqual((await stateOf(relayB)).bindings, []);
+
+    // A binder already holding the owner's role from another owner is refused too, and the owner's side is rolled back.
+    const other = await connect(relayB, "claude", "claude-b");
+    try {
+      const ot = await register(other, "cl-b", "architect");
+      await register(remote, "cx-remote", "worker", ot.token);
+      const twice = await remote.callTool({ name: "register", arguments: { sessionId: "cx-remote", role: "worker", token: cl.token } });
+      assert.equal(twice.isError, true);
+      assert.match(textOf(twice), /Role "architect" is already bound to cx-remote by session cl-b; register with another role/);
+      const onAAfter = (await stateOf(relayA)).bindings.find((b: { sessionId: string }) => b.sessionId === "cl-1");
+      assert.deepEqual(onAAfter.counterparts.map((c: { sessionId: string }) => c.sessionId), ["cx-local"]);
+    } finally {
+      await other.close();
+    }
   } finally {
     await Promise.allSettled([claude.close(), local.close(), remote.close()]);
     await Promise.allSettled([relayA.close(), relayB.close()]);

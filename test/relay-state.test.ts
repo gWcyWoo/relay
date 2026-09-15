@@ -134,10 +134,11 @@ describe("relay state: send", () => {
     );
     await assert.rejects(relay.send({ message: "x", selfSessionId: "cx", target: "" }), /target or role is required/);
 
-    // Roles are unique per relay, so ambiguity is only possible by provider alone.
+    // Roles are unique among a session's counterparts, so ambiguity is only possible by provider alone.
+    relay.register({ sessionId: "cl2", provider: "claude", role: "review" });
     assert.throws(
-      () => relay.register({ sessionId: "cl2", provider: "claude", role: "review" }),
-      /Role "review" is taken by session cl; register with another role/,
+      () => relay.bind("cx", { sessionId: "cl2", provider: "claude", role: "review", token: "t3@127.0.0.1:8765" }),
+      /Role "review" is already bound to cx by session cl; register with another role/,
     );
     relay.register({ sessionId: "cl2", provider: "claude", role: "review2" });
     relay.bind("cx", { sessionId: "cl2", provider: "claude", role: "review2", token: "t3@127.0.0.1:8765" });

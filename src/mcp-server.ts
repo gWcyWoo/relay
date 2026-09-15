@@ -28,7 +28,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     {
       capabilities: { experimental: { "claude/channel": {} } },
       instructions:
-        "You are connected to Relay. Call register(sessionId, role) once; role must be unique on this relay (a taken role is refused: pick another and register again), and the result carries this session's token, which the user hands to a counterpart session. To bind to a counterpart, call register again with that session's token: each token adds one binding, your own token never changes, the counterpart may be on another machine, and it is told who bound to it (the result says whether that notice was delivered). The result's bound list is the only place your bindings are shown, so read it. Then send(message, selfSessionId, role, urgent) reaches a bound session by its role (e.g. 'review'); target (its provider, or a bound sessionId such as meta.from of a received push) is only needed when the role is unknown. Set urgent only when the message must interrupt the counterpart's current work (a Codex turn is steered instead of the message waiting behind it). A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using role=meta.role. Nothing relayed may stay hidden from the user: the pushed message is not rendered by the client, so start your response by showing who sent it and its full text; and after you reply with send, show the full text you sent, not a summary. Sessions without a push channel (e.g. codex) block in send until the reply arrives, so keep waiting on that call; after 4 minutes without a reply the call returns a note and the reply, when it comes, arrives as a new turn in your session, as does an answer that comes while you are not waiting or after you ended the turn that called send. Sending again while a reply is pending is fine: the newer send takes over the wait. Sessions with a push channel (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave; bindings on both sides are dropped.",
+        "You are connected to Relay. Call register(sessionId, role) once; the result carries this session's token, which the user hands to a counterpart session. To bind to a counterpart, call register again with that session's token: each token adds one binding, your own token never changes, the counterpart may be on another machine, and it is told who bound to it (the result says whether that notice was delivered). Roles are unique among the sessions bound to one counterpart, so a binding whose role that counterpart already has is refused: pick another role and register again. The result's bound list is the only place your bindings are shown, so read it. Then send(message, selfSessionId, role, urgent) reaches a bound session by its role (e.g. 'review'); target (its provider, or a bound sessionId such as meta.from of a received push) is only needed when the role is unknown. Set urgent only when the message must interrupt the counterpart's current work (a Codex turn is steered instead of the message waiting behind it). A message pushed to you via the channel carries meta.from (sender sessionId), meta.provider and meta.role; answer with send using role=meta.role. Nothing relayed may stay hidden from the user: the pushed message is not rendered by the client, so start your response by showing who sent it and its full text; and after you reply with send, show the full text you sent, not a summary. Sessions without a push channel (e.g. codex) block in send until the reply arrives, so keep waiting on that call; after 4 minutes without a reply the call returns a note and the reply, when it comes, arrives as a new turn in your session, as does an answer that comes while you are not waiting or after you ended the turn that called send. Sending again while a reply is pending is fine: the newer send takes over the wait. Sessions with a push channel (claude) return immediately. Claude Code sessions see one reconnect right after register: Relay forces it so the session starts accepting channel pushes, and the registration survives it, so do not register again or reconnect manually. Call unregister to leave; bindings on both sides are dropped.",
     },
   );
 
@@ -39,7 +39,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
         "Register this session and get its token, or bind it to a counterpart by passing that session's token. If the result contains setupProblems, tell the user each one with its fix; otherwise nothing needs attention.",
       inputSchema: {
         sessionId: z.string().min(1).describe("Stable id of this session, kept across reconnects."),
-        role: z.string().min(1).describe("Role label such as review or executor, unique on this relay; counterparts address you by it."),
+        role: z.string().min(1).describe("Role label such as review or executor; counterparts address you by it, so it must differ from the roles they already have bound."),
         token: z
           .string()
           .optional()
@@ -76,7 +76,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
     "send",
     {
       description:
-        "Send a message to a bound session. Name the counterpart by role (roles are unique on a relay); target (its provider or a bound sessionId) is only needed when role is unknown. Codex blocks here until the counterpart answers and gets its message back, so keep waiting on this call; after 4 minutes without an answer it returns a note and the answer arrives later as a new turn in the Codex thread, as it does when the answer comes while Codex is not waiting. Claude returns at once.",
+        "Send a message to a bound session. Name the counterpart by role (unique among your bindings); target (its provider or a bound sessionId) is only needed when role is unknown. Codex blocks here until the counterpart answers and gets its message back, so keep waiting on this call; after 4 minutes without an answer it returns a note and the answer arrives later as a new turn in the Codex thread, as it does when the answer comes while Codex is not waiting. Claude returns at once.",
       inputSchema: {
         message: z.string().min(1),
         selfSessionId: z.string().min(1),
@@ -84,7 +84,7 @@ export function createRelayMcpServer(options: RelayMcpServerOptions): McpServer 
           .string()
           .default("")
           .describe("Optional when role is given. Counterpart provider, e.g. 'claude', or a bound sessionId from meta.from."),
-        role: z.string().default("").describe("Counterpart role, e.g. review or executor; unique per relay, so it alone names the counterpart."),
+        role: z.string().default("").describe("Counterpart role, e.g. review or executor; unique among your bindings, so it alone names the counterpart."),
         urgent: z
           .boolean()
           .default(false)

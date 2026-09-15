@@ -79,7 +79,7 @@ export interface SendOptions {
   selfSessionId: string;
   /** Counterpart provider, e.g. "claude", matched among the sender's bindings; a bound sessionId is also accepted. Empty: any provider. */
   target?: string;
-  /** Counterpart role, e.g. "review"; roles are unique per relay, so this alone names a counterpart. Empty matches any role. */
+  /** Counterpart role, e.g. "review"; roles are unique among a session's bindings, so this alone names a counterpart. Empty matches any role. */
   role?: string;
   /** Interrupt the counterpart's current work with this message instead of queueing behind it. */
   urgent?: boolean;
@@ -108,8 +108,6 @@ export interface RelayState {
   /** Register a local session; the token is minted once and kept on later calls. */
   register(session: { sessionId: string; provider: string; role: string }): Registration;
   findByToken(token: string): Registration | undefined;
-  /** The local session registered under `role`, if any; roles are unique per relay. */
-  findByRole(role: string): Registration | undefined;
   /** Let `sessionId` reach `counterpart`; both ways when the counterpart is registered here. */
   bind(sessionId: string, counterpart: Binding): void;
   bindingsOf(sessionId: string): Binding[];
@@ -195,10 +193,6 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
     }
   }
 
-  function findByRole(role: string): Registration | undefined {
-    return [...registrations.values()].find((r) => r.role === role);
-  }
-
   function resolveTarget(self: Registration, target: string, role: string): string {
     const mine = bindingsMap(self.sessionId);
     if (mine.has(target)) return target;
@@ -240,10 +234,6 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
 
   return {
     register({ sessionId, provider, role }) {
-      const holder = findByRole(role);
-      if (holder && holder.sessionId !== sessionId) {
-        throw new Error(`Role "${role}" is taken by session ${holder.sessionId}; register with another role`);
-      }
       const existing = registrations.get(sessionId);
       const registration = { sessionId, provider, role, token: existing?.token ?? mintToken() };
       registrations.set(sessionId, registration);
@@ -254,11 +244,16 @@ export function createRelayState({ mintToken, waitLimitMs = DEFAULT_WAIT_LIMIT_M
       return [...registrations.values()].find((r) => r.token === token);
     },
 
-    findByRole,
-
     bind(sessionId, counterpart) {
       const self = requireRegistration(sessionId);
       if (counterpart.sessionId === sessionId) throw new Error(`Session ${sessionId} cannot bind to itself`);
+      // Roles are unique among one session's counterparts, so send can name one by role alone.
+      const mine = [...bindingsMap(sessionId).values()].find((b) => b.role === counterpart.role && b.sessionId !== counterpart.sessionId);
+      if (mine) throw new Error(`Role "${counterpart.role}" is already bound to ${sessionId} by session ${mine.sessionId}; register with another role`);
+      if (registrations.has(counterpart.sessionId)) {
+        const theirs = [...bindingsMap(counterpart.sessionId).values()].find((b) => b.role === self.role && b.sessionId !== sessionId);
+        if (theirs) throw new Error(`Role "${self.role}" is already bound to ${counterpart.sessionId} by session ${theirs.sessionId}; register with another role`);
+      }
       bindingsMap(sessionId).set(counterpart.sessionId, { ...counterpart });
       if (counterpart.address === undefined && registrations.has(counterpart.sessionId)) {
         bindingsMap(counterpart.sessionId).set(sessionId, {

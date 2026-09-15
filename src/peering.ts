@@ -206,7 +206,14 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
         notice: BindNotice;
       };
       const binding: Binding = { ...target, token, address };
-      relay.bind(session.sessionId, binding);
+      try {
+        relay.bind(session.sessionId, binding);
+      } catch (error) {
+        // The owner's relay already wrote its side; take that back before failing.
+        const unbind: PeerUnbindRequest = { token, sessionId: session.sessionId };
+        await postPeer(address, "/peer/unbind", unbind).catch(() => undefined);
+        throw error;
+      }
       relay.connect(target.sessionId, remoteConnection(address, token, target.sessionId, target.provider));
       return notice;
     },
@@ -231,14 +238,6 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
       if (target.sessionId === request.session.sessionId) {
         return { status: 400, body: { error: `Session ${target.sessionId} cannot bind to itself` } };
       }
-      const holder = relay.findByRole(request.session.role);
-      if (holder && holder.sessionId !== request.session.sessionId) {
-        const me = self();
-        return {
-          status: 409,
-          body: { error: `Role "${request.session.role}" is taken by session ${holder.sessionId} on relay ${me.host}:${me.port}; register with another role` },
-        };
-      }
       const address = `http://${callerHost}:${request.port}`;
       try {
         const ping = await fetch(new URL("/peer/ping", address));
@@ -255,7 +254,11 @@ export function createPeering({ relay, self, ownHosts }: PeeringOptions): Peerin
         };
       }
       const { session } = request;
-      relay.bind(target.sessionId, { sessionId: session.sessionId, provider: session.provider, role: session.role, token: session.token, address });
+      try {
+        relay.bind(target.sessionId, { sessionId: session.sessionId, provider: session.provider, role: session.role, token: session.token, address });
+      } catch (error) {
+        return { status: 409, body: { error: describe(error) } };
+      }
       relay.connect(session.sessionId, remoteConnection(address, session.token, session.sessionId, session.provider));
       const notice = await notifyOwner(target.sessionId, session);
       return { status: 200, body: { session: { sessionId: target.sessionId, provider: target.provider, role: target.role }, notice } };
